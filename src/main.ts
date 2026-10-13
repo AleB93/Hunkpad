@@ -20,6 +20,7 @@ import {
   RepoStatus,
   Stash,
   cloneRepo,
+  credentialTarget,
   runGit,
   setApprover,
   setGitMissingHandler,
@@ -70,6 +71,7 @@ import {
   loadUserTabs,
   loadUsers,
   newUserId,
+  npmScriptNames,
   removeProject,
   repoColor,
   saveUserTabs,
@@ -261,13 +263,22 @@ async function act(label: string, fn: () => Promise<unknown>) {
     } else {
       showError(e);
       setStatus(`${label} failed: ${errorText(e)}`, true);
-      finishSession("failed", e instanceof GitError ? "" : errorText(e));
+      finishSession("failed", e instanceof GitError ? signInHint(e) : errorText(e));
     }
   } finally {
     currentAction = previous;
     if (--busy === 0) document.body.classList.remove("busy");
     await refresh().catch(showError);
   }
+}
+
+/** For a fetch / pull / push the server turned away: where to choose the account. */
+function signInHint(e: GitError): string {
+  const sub = e.args.find((a) => ["fetch", "pull", "push", "ls-remote"].includes(a));
+  const refused = /repository not found|authentication failed|could not read (username|password)|permission .* denied|403/i;
+  return sub && refused.test(e.message)
+    ? "Wrong account, or no login saved? Choose the account this repository uses with ⋯ → Sign in…"
+    : "";
 }
 
 // ---- asking before Git commands ---------------------------------------------
@@ -373,6 +384,12 @@ function explainGit(args: string[]): { text: string; danger: boolean } {
       return say("Manages remotes.");
     case "read-tree":
       return say("Loads a tree into the (temporary) index.");
+    case "config":
+      if (rest.some((a) => /^credential\..*\.username$/.test(a)))
+        return has("--unset")
+          ? say("Stops choosing an account for that server in this repository: Git signs in with its default login again.")
+          : say("Chooses the account Git signs in with on that server, for this repository only (.git/config).");
+      return say("Changes a setting of this repository (.git/config).");
     default:
       return say("Runs this Git command.");
   }
@@ -3367,6 +3384,8 @@ const scriptDialog = $<HTMLDialogElement>("script-dialog");
 const scriptName = $<HTMLInputElement>("script-name");
 const scriptPath = $<HTMLInputElement>("script-path");
 const scriptError = $("script-error");
+const scriptNpmField = $("script-npm-field");
+const scriptNpm = $<HTMLSelectElement>("script-npm");
 
 /** The active repository's scripts as ▶ buttons. */
 function renderScripts() {
@@ -3379,7 +3398,9 @@ function renderScripts() {
         h(
           "button",
           {
-            title: `${s.path}\nRuns in a new window, in ${r.root}\nRight-click to edit or remove`,
+            title: s.npm
+              ? `npm run ${s.npm}\nRuns in a new window, in ${s.path.replace(/[\\/]package\.json$/, "")}\nRight-click to edit or remove`
+              : `${s.path}\nRuns in a new window, in ${r.root}\nRight-click to edit or remove`,
             onclick: () => runScript(s),
           },
           h("span", { class: "play" }, "▶"),
@@ -3394,7 +3415,7 @@ function renderScripts() {
 async function runScript(s: UserScript) {
   if (!repo) return;
   try {
-    await invoke("launch_script", { cwd: repo.root, script: s.path });
+    await invoke("launch_script", { cwd: repo.root, script: s.path, npm: s.npm ?? null });
     setStatus(`Started “${s.name}” in a new window (in ${repo.name})`);
   } catch (e) {
     setStatus(`Could not start “${s.name}”: ${errorText(e)}`, true);
@@ -3435,20 +3456,40 @@ async function scriptDialogFor(existing?: UserScript): Promise<UserScript | null
   scriptName.value = existing?.name ?? "";
   scriptPath.value = existing?.path ?? "";
   scriptError.textContent = "";
+  await refreshNpmScripts(existing?.npm);
   scriptDialog.returnValue = "";
   scriptDialog.showModal();
   (existing ? scriptName : scriptPath).focus();
   await new Promise((resolve) => scriptDialog.addEventListener("close", resolve, { once: true }));
   if (scriptDialog.returnValue !== "ok") return null;
-  return { id: existing?.id ?? newUserId(), name: scriptName.value.trim(), path: scriptPath.value.trim() };
+  const s: UserScript = { id: existing?.id ?? newUserId(), name: scriptName.value.trim(), path: scriptPath.value.trim() };
+  if (isPackageJson(s.path)) s.npm = scriptNpm.value;
+  return s;
+}
+
+const isPackageJson = (path: string) => /(^|[\\/])package\.json$/.test(path);
+
+/** When "Where it is" is a package.json, lists its scripts (keeping `selected`); otherwise hides the list. */
+async function refreshNpmScripts(selected?: string) {
+  const path = scriptPath.value.trim().replace(/^"(.*)"$/, "$1");
+  let names: string[] = [];
+  if (isPackageJson(path)) {
+    // Unreadable: the list stays empty and Save says why.
+    names = npmScriptNames(await invoke<string>("read_package_json", { path }).catch(() => ""));
+  }
+  scriptNpm.replaceChildren(...names.map((n) => h("option", { value: n }, n)));
+  if (selected && names.includes(selected)) scriptNpm.value = selected;
+  scriptNpmField.classList.toggle("hidden", !isPackageJson(path));
 }
 
 scriptPath.placeholder = isWindows ? "C:\\path\\to\\script.ps1" : "/path/to/script.sh";
 $("script-help").textContent = isWindows
   ? "Runs in a new console window, in this repository's folder. .ps1 with PowerShell, .cmd/.bat with cmd, " +
-    ".sh with Git Bash, .py with python, .js with node; other files with their Windows default program."
+    ".sh with Git Bash, .py with python, .js with node; other files with their Windows default program. " +
+    "For a package.json, choose one of its scripts: it runs with npm run, in that folder."
   : `Runs in a new ${isMac ? "Terminal" : "terminal"} window, in this repository's folder. .sh with bash, ` +
-    ".zsh with zsh, .py with python3, .js with node, .ps1 with pwsh; other files must be executable (chmod +x).";
+    ".zsh with zsh, .py with python3, .js with node, .ps1 with pwsh; other files must be executable (chmod +x). " +
+    "For a package.json, choose one of its scripts: it runs with npm run, in that folder.";
 
 $("script-cancel").addEventListener("click", () => scriptDialog.close("cancel"));
 for (const input of [scriptName, scriptPath]) input.addEventListener("input", () => (scriptError.textContent = ""));
@@ -3459,19 +3500,30 @@ $("script-browse").addEventListener("click", async () => {
     defaultPath: repo?.root,
     filters: [
       {
-        name: "Scripts",
+        name: "Scripts, package.json",
         extensions: isWindows
-          ? ["ps1", "cmd", "bat", "sh", "py", "js", "mjs", "exe"]
-          : ["sh", "bash", "zsh", "command", "py", "js", "mjs", "ps1"],
+          ? ["ps1", "cmd", "bat", "sh", "py", "js", "mjs", "exe", "json"]
+          : ["sh", "bash", "zsh", "command", "py", "js", "mjs", "ps1", "json"],
       },
       { name: "All files", extensions: ["*"] },
     ],
   });
   if (typeof file !== "string") return;
   scriptPath.value = file;
-  // Suggest a name from the file name when none was typed.
-  if (!scriptName.value.trim()) scriptName.value = file.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "");
   scriptError.textContent = "";
+  await refreshNpmScripts();
+  // Suggest a name from the npm script or the file name when none was typed.
+  if (!scriptName.value.trim())
+    scriptName.value = isPackageJson(file) ? scriptNpm.value : file.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "");
+});
+
+// A typed or pasted path is checked once the field is left.
+scriptPath.addEventListener("change", () => refreshNpmScripts(scriptNpm.value).catch(showError));
+scriptNpm.addEventListener("change", () => {
+  scriptError.textContent = "";
+  // Follow the chosen script while the name is still a suggestion (empty or another script's name).
+  const names = [...scriptNpm.options].map((o) => o.value);
+  if (!scriptName.value.trim() || names.includes(scriptName.value.trim())) scriptName.value = scriptNpm.value;
 });
 
 // Save validates (the file must exist) before closing.
@@ -3482,6 +3534,10 @@ $("script-save").addEventListener("click", async () => {
   if (!name) return void (scriptError.textContent = "Enter a name.");
   if (!path) return void (scriptError.textContent = "Choose where the script is.");
   if (!(await invoke<boolean>("is_file", { path }))) return void (scriptError.textContent = "No file at that path.");
+  if (isPackageJson(path)) {
+    await refreshNpmScripts(scriptNpm.value);
+    if (!scriptNpm.value) return void (scriptError.textContent = "This package.json has no scripts.");
+  }
   scriptDialog.close("ok");
 });
 // Enter in a field saves, like the other dialogs.
@@ -3744,6 +3800,7 @@ function remoteMenu(rm: Remote): MenuItem[] {
   return [
     { label: `Fetch ${rm.name}`, run: () => act(`Fetch ${rm.name}`, () => r.fetchRemote(rm.name)) },
     { label: "Copy URL", run: () => navigator.clipboard.writeText(rm.fetchUrl) },
+    { label: "Sign in…", run: () => signIn(rm).catch(showError) },
     "-",
     {
       label: "Change URL…",
@@ -3771,6 +3828,88 @@ function remoteMenu(rm: Remote): MenuItem[] {
   ];
 }
 
+// ---- sign-in (HTTPS remotes; git.ts) ------------------------------------------
+
+const signinDialog = $<HTMLDialogElement>("signin-dialog");
+const signinAccount = $<HTMLInputElement>("signin-account");
+const signinToken = $<HTMLInputElement>("signin-token");
+const signinError = $("signin-error");
+const TOKEN_PAGES = ["github.com", "gitlab.com"];
+/** The server the open sign-in dialog is for. */
+let signinHost = "";
+
+/** The remote a push goes to: the upstream's, else origin, else the first. */
+async function pushRemote(r: Repo): Promise<Remote | undefined> {
+  const remotes = await r.remoteList();
+  const upstream = status?.upstream ?? "";
+  return (
+    remotes.filter((rm) => upstream.startsWith(`${rm.name}/`)).sort((a, b) => b.name.length - a.name.length)[0] ??
+    remotes.find((rm) => rm.name === "origin") ??
+    remotes[0]
+  );
+}
+
+/** Asks which account `rm` (default: the push remote) signs in with, and saves that login. */
+async function signIn(rm?: Remote) {
+  const r = repo;
+  if (!r) return;
+  rm ??= await pushRemote(r);
+  if (!rm) return setStatus("This repository has no remote to sign in to", true);
+  const url = rm.pushUrl || rm.fetchUrl;
+  const t = credentialTarget(url);
+  if (!t) return setStatus(`“${rm.name}” is not an HTTPS remote: SSH remotes sign in with an SSH key, set up outside Hunkpad`, true);
+  if (!(await r.hasCredentialHelper()))
+    return setStatus("Git has no credential helper to keep a login (credential.helper is not set): install Git Credential Manager", true);
+
+  const { account, local } = await r.signInAccount(url);
+  signinHost = t.host;
+  $("signin-title").textContent = `Sign in to ${t.host}`;
+  $("signin-where").textContent =
+    `For this repository only, remote “${rm.name}” (${url}). ` +
+    (account ? `It now signs in as ${account}.` : `It now uses the default login for ${t.host}.`);
+  signinAccount.value = account;
+  // An account written in the URL can only change with the URL.
+  signinAccount.disabled = !!t.urlUser;
+  signinAccount.title = t.urlUser ? "Named in the remote URL: change the URL to use another account" : "";
+  signinAccount.placeholder = `Your ${t.host} username`;
+  signinToken.value = "";
+  $("signin-create").classList.toggle("hidden", !TOKEN_PAGES.includes(t.host));
+  $("signin-default").classList.toggle("hidden", !local || !!t.urlUser);
+  $("signin-help").textContent =
+    `${t.host} does not take your account password here: use a personal access token, created while signed in to ` +
+    `${t.host} as that account, with access to this repository` +
+    (t.host === "github.com" ? " (classic token: the repo scope)" : "") +
+    ". It is kept by Git's credential helper (e.g. the macOS Keychain), not by Hunkpad.";
+  signinError.textContent = "";
+  signinDialog.returnValue = "";
+  signinDialog.showModal();
+  (signinAccount.disabled || signinAccount.value ? signinToken : signinAccount).focus();
+  await new Promise((resolve) => signinDialog.addEventListener("close", resolve, { once: true }));
+
+  const remote = rm.name;
+  const name = signinAccount.value.trim();
+  const token = signinToken.value.trim();
+  signinToken.value = "";
+  if (signinDialog.returnValue === "ok")
+    await act(`Sign in to ${t.host} as ${name}`, () => r.signIn(remote, url, name, token));
+  else if (signinDialog.returnValue === "default")
+    await act(`Use the default ${t.host} account`, () => r.useDefaultAccount(url));
+}
+
+$("signin-save").addEventListener("click", () => {
+  if (!signinAccount.value.trim()) return void (signinError.textContent = "Enter the account (username).");
+  if (!signinToken.value.trim()) return void (signinError.textContent = "Paste an access token for that account.");
+  signinDialog.close("ok");
+});
+$("signin-default").addEventListener("click", () => signinDialog.close("default"));
+$("signin-cancel").addEventListener("click", () => signinDialog.close("cancel"));
+$("signin-create").addEventListener("click", () => invoke("open_token_page", { host: signinHost }).catch(showError));
+signinDialog.querySelector("form")!.addEventListener("submit", (e) => {
+  e.preventDefault();
+  $("signin-save").click();
+});
+for (const input of [signinAccount, signinToken]) input.addEventListener("input", () => (signinError.textContent = ""));
+
 function moreMenu(): MenuItem[] {
   const items: MenuItem[] = [
     { label: keys("Projects…  (Ctrl+R)"), run: showProjects },
@@ -3793,6 +3932,7 @@ function moreMenu(): MenuItem[] {
     },
     "-",
     { label: "Add remote…", run: () => addRemoteFlow().catch(showError) },
+    { label: "Sign in…", run: () => signIn().catch(showError) },
     { label: "New branch…", run: newBranch },
     { label: "New tag…", run: newTag },
     { label: "Stash changes…", run: () => stashChanges(false) },

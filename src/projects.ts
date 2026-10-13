@@ -252,8 +252,21 @@ export function saveKeptLocal(repo: string, paths: string[]) {
 export interface UserScript {
   id: string;
   name: string;
-  /** Absolute path of an existing script file. */
+  /** Absolute path of an existing script file, or of a package.json when `npm` is set. */
   path: string;
+  /** An npm script from that package.json, run with `npm run` in its folder. */
+  npm?: string;
+}
+
+/** The script names of a package.json, in file order; [] when it has none or is not valid JSON. */
+export function npmScriptNames(packageJson: string): string[] {
+  try {
+    const scripts = JSON.parse(packageJson)?.scripts;
+    if (!scripts || typeof scripts !== "object") return [];
+    return Object.keys(scripts).filter((k) => typeof scripts[k] === "string");
+  } catch {
+    return [];
+  }
 }
 
 export function loadScripts(repo: string): UserScript[] {

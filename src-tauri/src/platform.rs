@@ -96,14 +96,18 @@ pub fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
 
 // ---- running a user script in a terminal ------------------------------------------
 
-/// Starts `script` in a new terminal window, in `cwd`, through a small launcher
-/// that keeps the window open until Enter so the output can be read. The
-/// interpreter follows the extension; other files must be executable.
+/// Single-quotes `s` for bash.
 #[cfg(not(windows))]
-pub fn launch_in_terminal(cwd: &str, script: &Path, ext: &str) -> Result<(), String> {
+pub fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// The bash command line that runs `script`: the interpreter follows the
+/// extension; other files must be executable.
+#[cfg(not(windows))]
+pub fn script_command(script: &Path, ext: &str) -> Result<String, String> {
     use std::os::unix::fs::PermissionsExt;
 
-    let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
     let file = quote(&script.to_string_lossy());
     let run = match ext {
         "sh" | "bash" | "command" => format!("bash {file}"),
@@ -122,6 +126,14 @@ pub fn launch_in_terminal(cwd: &str, script: &Path, ext: &str) -> Result<(), Str
             file
         }
     };
+    Ok(run)
+}
+
+/// Runs the bash command line `run` in a new terminal window, in `cwd`, through
+/// a small launcher that keeps the window open until Enter so the output can be read.
+#[cfg(not(windows))]
+pub fn launch_in_terminal(cwd: &str, run: &str) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
 
     let dir = std::env::temp_dir().join("hunkpad-scripts");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;

@@ -59,8 +59,8 @@ manager included.
   ⋯ → Ask before Git commands.
 - **Kept local**: files whose changes stay on this machine and are never staged
   or committed (e.g. local settings), without touching `.gitignore`.
-- **Scripts row**: per repository, add an existing script and run it with one
-  click in a new terminal window, in the repository folder (see
+- **Scripts row**: per repository, add an existing script or an npm script and
+  run it with one click in a new terminal window, in the repository folder (see
   [Scripts](#scripts)).
 - **Git users**: a first row of tabs (Work, Personal…), each with its own commit
   author name/email and its own repository tabs. The identity is passed as
@@ -119,6 +119,9 @@ open afterwards so the output can be read.
   macOS uses Terminal (or whichever app opens `.command` files). Linux uses
   `$TERMINAL` if set, otherwise the first terminal found (GNOME Terminal,
   Konsole, xfce4-terminal, Alacritty, kitty, xterm…).
+- **npm scripts**: choose a `package.json` (at the root or in a subfolder such
+  as `app/`) and pick one of its scripts. It runs as `npm run <script>` in that
+  `package.json`'s folder.
 
 ## Use from your IDE
 

@@ -39,7 +39,7 @@
     <div id="scriptbar" class="repo-only">
       <span class="small muted">Scripts</span>
       <div id="script-buttons"></div>
-      <button id="add-script" title="Add an existing script to this repository">+ Script</button>
+      <button id="add-script" title="Add an existing script, or an npm script, to this repository">+ Script</button>
     </div>
     <!-- Everything below the tabs: framed in the active repo colour. -->
     <div id="workspace">
@@ -198,11 +198,35 @@
         <label class="field">Name <input id="remote-name" placeholder="origin" autocomplete="off" spellcheck="false" /></label>
         <label class="field">URL <input id="remote-url" placeholder="https://github.com/owner/repo.git" autocomplete="off" spellcheck="false" /></label>
         <label class="small" id="remote-fetch-row"><input type="checkbox" id="remote-fetch" checked /> Fetch from it after adding</label>
-        <p class="small muted">HTTPS or SSH URL (e.g. git@github.com:owner/repo.git), or a local path. Sign-in for private repositories is handled by Git Credential Manager on the first fetch or push.</p>
+        <p class="small muted">HTTPS or SSH URL (e.g. git@github.com:owner/repo.git), or a local path. To choose the account an HTTPS remote signs in with, use ⋯ → Sign in….</p>
         <div id="remote-error" class="small err"></div>
         <div class="row end">
           <button id="remote-cancel" type="button">Cancel</button>
           <button id="remote-save" type="button" class="primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Which account this repository pushes and pulls as, on an HTTPS remote (main.ts, git.ts). -->
+    <dialog id="signin-dialog">
+      <form method="dialog" novalidate>
+        <strong id="signin-title">Sign in</strong>
+        <p id="signin-where" class="small muted"></p>
+        <label class="field">Account <input id="signin-account" autocomplete="off" spellcheck="false" /></label>
+        <label class="field">
+          Access token
+          <span class="row">
+            <input id="signin-token" class="spacer" type="password" autocomplete="off" spellcheck="false" />
+            <button id="signin-create" type="button">Create one…</button>
+          </span>
+        </label>
+        <p id="signin-help" class="small muted"></p>
+        <div id="signin-error" class="small err"></div>
+        <div class="row end">
+          <button id="signin-default" type="button">Use the default account</button>
+          <span class="spacer"></span>
+          <button id="signin-cancel" type="button">Cancel</button>
+          <button id="signin-save" type="button" class="primary">Sign in</button>
         </div>
       </form>
     </dialog>
@@ -253,6 +277,8 @@
             <button id="script-browse" type="button">Browse…</button>
           </span>
         </label>
+        <!-- Shown when "Where it is" is a package.json: which of its scripts npm runs. -->
+        <label id="script-npm-field" class="field hidden">npm script <select id="script-npm"></select></label>
         <!-- Filled in for this platform (main.ts). -->
         <p id="script-help" class="small muted"></p>
         <div id="script-error" class="small err"></div>

@@ -239,7 +239,8 @@ dialog.picker[open] { display: flex; flex-direction: column; gap: 8px; }
 
 dialog::backdrop { background: rgb(0 0 0 / 0.35); }
 dialog form { display: flex; flex-direction: column; gap: 10px; }
-dialog input {
+dialog input,
+dialog select {
   font: inherit;
   color: inherit;
   background: var(--bg-side);

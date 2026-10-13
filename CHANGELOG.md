@@ -27,6 +27,8 @@ All notable changes to Hunkpad are listed here. The format follows
     shell's PATH is used, so Git hooks find tools such as node or Homebrew's Git.
   - On Linux, project paths are compared case-sensitively, and hitting the
     file-watch limit shows how to raise it.
+- npm scripts in the Scripts row: choose a `package.json` and one of its
+  scripts, and it runs with `npm run` in that folder.
 - A strict Content Security Policy for the app's page.
 - Tests for the Git output parsers, run against real Git.
 

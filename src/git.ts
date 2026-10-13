@@ -211,6 +211,29 @@ export interface Remote {
   pushUrl: string;
 }
 
+/** Where an HTTPS remote signs in: what Git's credential helpers key a login by. */
+export interface CredentialTarget {
+  protocol: string;
+  /** With the port, when there is one. */
+  host: string;
+  /** The account written in the URL itself (https://name@host/…), which wins over any setting; "" when none. */
+  urlUser: string;
+}
+
+/** The sign-in target of an http(s) remote URL; null for SSH and local remotes (SSH keys, or no sign-in). */
+export function credentialTarget(url: string): CredentialTarget | null {
+  if (!/^https?:\/\//i.test(url)) return null;
+  try {
+    const u = new URL(url);
+    return { protocol: u.protocol.slice(0, -1), host: u.host, urlUser: decodeURIComponent(u.username) };
+  } catch {
+    return null;
+  }
+}
+
+/** The repository setting naming the account to sign in with on that server. */
+const accountKey = (t: CredentialTarget) => `credential.${t.protocol}://${t.host}.username`;
+
 export interface ChangedFile {
   status: string;
   path: string;
@@ -629,6 +652,69 @@ export class Repo {
     const [remote] = await this.remotes();
     if (!remote) throw new Error("No remote configured");
     await this.git(["push", "--progress", "-u", remote, "HEAD"]);
+  }
+
+  // ---- sign-in (HTTPS remotes) -------------------------------------------
+  //
+  // The login itself is kept by Git's credential helper (macOS Keychain, Git
+  // Credential Manager…), never by Hunkpad. The repository only records which
+  // account to use for that server, in .git/config, so other repositories keep
+  // their own (or the default) login.
+
+  /** Whether Git has a credential helper, i.e. somewhere to keep a login. */
+  async hasCredentialHelper(): Promise<boolean> {
+    return (await this.read(["config", "--get-all", "credential.helper"], true)).trim() !== "";
+  }
+
+  /** The account Git signs in with for `url` ("" = the server's default login), and whether this repository chose it. */
+  async signInAccount(url: string): Promise<{ account: string; local: boolean }> {
+    const t = credentialTarget(url);
+    if (!t) return { account: "", local: false };
+    if (t.urlUser) return { account: t.urlUser, local: true };
+    const local = (await this.read(["config", "--local", "--get", accountKey(t)], true)).trim();
+    if (local) return { account: local, local: true };
+    return { account: (await this.read(["config", "--get-urlmatch", "credential.username", url], true)).trim(), local: false };
+  }
+
+  /**
+   * Signs this repository in to `remote` (at `url`) as `account`: the token goes
+   * to the credential helper through stdin (never on the command line, in the
+   * output log or in the "Ask before Git commands" prompt), the account into
+   * .git/config, then reading the remote checks both. On failure both are undone.
+   */
+  async signIn(remote: string, url: string, account: string, token: string) {
+    const t = credentialTarget(url);
+    if (!t) throw new Error(`${remote} is not an HTTPS remote`);
+    if (/[\0\n\r]/.test(account + token)) throw new Error("The account and token cannot contain line breaks");
+    const key = accountKey(t);
+    const previous = (await this.read(["config", "--local", "--get", key], true)).trim();
+    const credential = `protocol=${t.protocol}\nhost=${t.host}\nusername=${account}\npassword=${token}\n\n`;
+    // An account in the URL already wins; otherwise this repository names it.
+    if (!t.urlUser && previous !== account) await this.git(["config", "--local", key, account]);
+    await this.git(["credential", "approve"], { stdin: credential, quiet: true });
+    const check = await this.git(["ls-remote", "--heads", remote], { quiet: true, allowFail: true });
+    if (check.code === 0) return;
+
+    await this.git(["credential", "reject"], { stdin: credential, quiet: true, allowFail: true });
+    if (!t.urlUser && previous !== account)
+      await this.git(previous ? ["config", "--local", key, previous] : ["config", "--local", "--unset", key], {
+        quiet: true,
+        allowFail: true,
+      });
+    const why = (check.stderr.trim() || check.stdout.trim()).split("\n").pop() ?? "";
+    throw new Error(
+      /not found/i.test(why)
+        ? `${account} cannot see this repository on ${t.host}: check the account, and that the token has access to the repository (${why})`
+        : /auth|denied|401|403|password/i.test(why)
+          ? `${t.host} refused the token for ${account}: check that it is valid and not expired (${why})`
+          : `Could not reach ${remote} as ${account}: ${why || `git ls-remote exited with code ${check.code}`}`,
+    );
+  }
+
+  /** Back to the server's default login: removes this repository's account setting (the saved login stays). */
+  async useDefaultAccount(url: string) {
+    const t = credentialTarget(url);
+    if (t) await this.git(["config", "--local", "--unset", accountKey(t)]);
   }
 
   // ---- stashes ----------------------------------------------------------

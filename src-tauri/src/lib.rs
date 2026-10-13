@@ -115,6 +115,20 @@ fn open_git_download() -> Result<(), String> {
     platform::open_url(platform::GIT_DOWNLOAD_URL)
 }
 
+/// Opens the page where `host` creates access tokens, for signing a repository
+/// in (only these known pages).
+#[tauri::command]
+fn open_token_page(host: String) -> Result<(), String> {
+    let url = match host.as_str() {
+        "github.com" => "https://github.com/settings/tokens/new?scopes=repo&description=Hunkpad",
+        "gitlab.com" => {
+            "https://gitlab.com/-/user_settings/personal_access_tokens?name=Hunkpad&scopes=read_repository,write_repository"
+        }
+        _ => return Err(format!("no token page known for {host}")),
+    };
+    platform::open_url(url)
+}
+
 fn git_command(cwd: &str) -> Command {
     let mut cmd = Command::new(git_exe());
     cmd.current_dir(cwd)
@@ -498,13 +512,32 @@ fn git_bash() -> Option<PathBuf> {
     bash.is_file().then_some(bash)
 }
 
+/// Whether `path` is a file named package.json (an npm script's location).
+fn is_package_json(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == "package.json") && path.is_file()
+}
+
+/// The content of a package.json, for listing its npm scripts.
+#[tauri::command]
+fn read_package_json(path: String) -> Result<String, String> {
+    let path = Path::new(&path);
+    if !is_package_json(path) {
+        return Err(format!("not a package.json: {}", path.display()));
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Starts a user script in a new console (Windows) or terminal window, in `cwd`
 /// (the repository). The window stays open afterwards so its output can be read.
+/// With `npm`, `script` is a package.json and `npm run <npm>` runs in its folder.
 #[tauri::command]
-fn launch_script(cwd: String, script: String) -> Result<(), String> {
+fn launch_script(cwd: String, script: String, npm: Option<String>) -> Result<(), String> {
     let path = Path::new(&script);
     if !path.is_file() {
         return Err(format!("script not found: {script}"));
+    }
+    if let Some(name) = npm {
+        return launch_npm_script(path, &name);
     }
     let ext = path
         .extension()
@@ -544,7 +577,35 @@ fn launch_script(cwd: String, script: String) -> Result<(), String> {
         Ok(())
     }
     #[cfg(not(windows))]
-    platform::launch_in_terminal(&cwd, path, &ext)
+    platform::launch_in_terminal(&cwd, &platform::script_command(path, &ext)?)
+}
+
+/// `npm run <name>` in a new console or terminal window, in the folder of
+/// `package_json`.
+fn launch_npm_script(package_json: &Path, name: &str) -> Result<(), String> {
+    if !is_package_json(package_json) {
+        return Err(format!("not a package.json: {}", package_json.display()));
+    }
+    let dir = package_json.parent().ok_or("package.json has no folder")?;
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        if name.contains('"') {
+            return Err(format!("unsupported npm script name: {name}"));
+        }
+        // Same outer quotes as launch_script: cmd strips them, the name keeps its own.
+        Command::new("cmd.exe")
+            .raw_arg(format!("/k \"npm run \"{name}\"\""))
+            .current_dir(dir)
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .spawn()
+            .map_err(|e| format!("could not start npm run {name}: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    platform::launch_in_terminal(&dir.to_string_lossy(), &format!("npm run {}", platform::quote(name)))
 }
 
 /// Stops watching (when the last tab is closed).
@@ -608,11 +669,13 @@ pub fn run() {
             remove_temp_index,
             is_file,
             launch_script,
+            read_package_json,
             migrate_data_dir,
             paths_exist,
             copy_as_file,
             git_version,
             open_git_download,
+            open_token_page,
             load_settings,
             save_settings
         ])
