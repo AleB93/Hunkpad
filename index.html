@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Diffpane</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <!-- Row 1: Git users. Row 2: the active user's repositories. -->
+    <div id="userbar">
+      <!-- Animated version of app-icon.svg: lines "type" in, cursor blinks, a CRT scanline sweeps. -->
+      <svg id="logo" viewBox="0 0 16 16" shape-rendering="crispEdges" role="img" aria-label="Diffpane">
+        <title>Diffpane</title>
+        <path fill="#1a1c2c" d="M1 0h14v1h1v14h-1v1H1v-1H0V1h1z" />
+        <rect x="2" y="2" width="1" height="1" fill="#ff004d" />
+        <rect x="3" y="2" width="1" height="1" fill="#ffa300" />
+        <rect x="4" y="2" width="1" height="1" fill="#00e436" />
+        <rect x="6" y="2" width="8" height="1" fill="#333c57" />
+        <rect x="7" y="4" width="2" height="10" fill="#262b44" />
+        <rect class="ln" style="--d: 0s" x="2" y="5" width="5" height="1" fill="#ff004d" />
+        <rect class="ln" style="--d: 0.3s" x="9" y="5" width="5" height="1" fill="#00e436" />
+        <rect class="ln" style="--d: 0.6s" x="2" y="7" width="3" height="1" fill="#5f574f" />
+        <rect class="ln" style="--d: 0.6s" x="9" y="7" width="3" height="1" fill="#5f574f" />
+        <rect class="ln" style="--d: 0.9s" x="2" y="9" width="4" height="1" fill="#ff004d" />
+        <rect class="ln" style="--d: 1.2s" x="9" y="9" width="5" height="1" fill="#00e436" />
+        <rect class="ln" style="--d: 1.5s" x="9" y="11" width="4" height="1" fill="#00e436" />
+        <rect class="cursor" x="13" y="11" width="1" height="2" fill="#ffec27" />
+        <rect class="scan" x="0" y="0" width="16" height="1" fill="#ffffff" />
+      </svg>
+      <div id="user-tabs"></div>
+      <button id="add-user" title="New Git user">+</button>
+    </div>
+    <div id="tabbar">
+      <div id="repo-tabs"></div>
+      <button id="add-tab" title="Open a saved project in a new tab (Ctrl+R)">+</button>
+    </div>
+    <!-- The active repository's own scripts: each runs in a new console, in the repo folder. -->
+    <div id="scriptbar" class="repo-only">
+      <span class="small muted">Scripts</span>
+      <div id="script-buttons"></div>
+      <button id="add-script" title="Add an existing script to this repository">+ Script</button>
+    </div>
+    <!-- Everything below the tabs: framed in the active repo colour. -->
+    <div id="workspace">
+    <header>
+      <button id="branch-btn" class="hidden" title="Branches"></button>
+      <button id="sync-btn" class="hidden" title="Synchronize: pull, then push"></button>
+      <span class="spacer"></span>
+      <button id="fetch-btn" class="repo-only" title="Fetch all remotes">Fetch</button>
+      <button id="pull-btn" class="repo-only">Pull</button>
+      <button id="push-btn" class="repo-only">Push</button>
+      <button id="refresh-btn" class="repo-only" title="Refresh (F5)">⟳</button>
+      <button id="layout-btn" title="Toggle inline / side-by-side">Inline</button>
+      <button id="more-btn" title="More actions">⋯</button>
+    </header>
+
+    <div id="body">
+      <!-- Retro loading screen (shown while a repository loads): a pixel CRT
+           scrolling diff lines, C64-style raster stripes and a chunky progress bar. -->
+      <div id="loader" class="hidden" role="status" aria-live="polite">
+        <div class="loader-card">
+          <svg class="crt" viewBox="0 0 24 21" shape-rendering="crispEdges" aria-hidden="true">
+            <defs><clipPath id="crt-screen"><rect x="4" y="4" width="16" height="10" /></clipPath></defs>
+            <rect x="1" y="1" width="22" height="16" fill="#5f574f" />
+            <rect x="2" y="2" width="20" height="14" fill="#c2c3c7" />
+            <rect x="4" y="4" width="16" height="10" fill="#1d2b53" />
+            <g clip-path="url(#crt-screen)">
+              <g class="crt-lines">
+                <rect x="5" y="5" width="8" height="1" fill="#ff004d" />
+                <rect x="5" y="7" width="11" height="1" fill="#00e436" />
+                <rect x="5" y="9" width="6" height="1" fill="#83769c" />
+                <rect x="5" y="11" width="9" height="1" fill="#00e436" />
+                <rect x="5" y="13" width="8" height="1" fill="#ff004d" />
+                <rect x="5" y="15" width="11" height="1" fill="#00e436" />
+                <rect x="5" y="17" width="6" height="1" fill="#83769c" />
+                <rect x="5" y="19" width="9" height="1" fill="#00e436" />
+              </g>
+              <rect class="crt-glare" x="17" y="5" width="1" height="2" fill="#29adff" />
+            </g>
+            <rect class="crt-led" x="18" y="14" width="2" height="1" fill="#00e436" />
+            <rect x="9" y="17" width="6" height="2" fill="#5f574f" />
+            <rect x="6" y="19" width="12" height="2" fill="#5f574f" />
+            <rect x="7" y="19" width="10" height="1" fill="#83769c" />
+          </svg>
+          <div class="loader-text">LOADING <span id="loader-name"></span><span class="loader-cursor">█</span></div>
+          <div class="loader-bar" aria-hidden="true">
+            <i style="--i: 0"></i><i style="--i: 1"></i><i style="--i: 2"></i><i style="--i: 3"></i>
+            <i style="--i: 4"></i><i style="--i: 5"></i><i style="--i: 6"></i><i style="--i: 7"></i>
+            <i style="--i: 8"></i><i style="--i: 9"></i><i style="--i: 10"></i><i style="--i: 11"></i>
+          </div>
+        </div>
+      </div>
+      <aside>
+        <nav id="tabs">
+          <button data-tab="changes" class="active">Changes</button>
+          <button data-tab="history">History</button>
+          <button data-tab="branches">Branches</button>
+          <button data-tab="stashes">Stashes</button>
+          <button data-tab="comments" id="comments-tab">Comments</button>
+        </nav>
+        <div id="panel-changes" class="panel">
+          <div id="op-banner" class="banner hidden"></div>
+          <div class="commit-box">
+            <textarea id="commit-msg" rows="3" placeholder="Message (Ctrl+Enter to commit)"></textarea>
+            <div class="row">
+              <button id="commit-btn" class="primary">Commit</button>
+              <label title="Replace the last commit"><input type="checkbox" id="amend-box" /> Amend</label>
+            </div>
+            <div id="commit-as" class="small muted"></div>
+          </div>
+          <div id="view-mode" class="seg" title="How files are arranged inside each section">
+            <span class="small muted">View</span>
+            <button data-mode="list">List</button>
+            <button data-mode="folder">Folders</button>
+            <button data-mode="time">Time</button>
+          </div>
+          <div id="changes-list"></div>
+        </div>
+        <div id="panel-history" class="panel hidden"></div>
+        <div id="panel-branches" class="panel hidden">
+          <div class="filter-bar">
+            <input id="branch-filter" type="search" placeholder="Filter branches and tags…" autocomplete="off" spellcheck="false" />
+          </div>
+          <div id="branch-list"></div>
+        </div>
+        <div id="panel-stashes" class="panel hidden"></div>
+        <div id="panel-comments" class="panel hidden">
+          <div class="filter-bar seg" id="comment-filter">
+            <button data-filter="open" class="active">Open</button>
+            <button data-filter="resolved">Resolved</button>
+            <button data-filter="outdated">Outdated</button>
+            <button data-filter="all">All</button>
+            <span class="spacer"></span>
+            <button id="copy-comments" title="Copy the comments shown, with their code lines, as Markdown">⧉ Copy</button>
+          </div>
+          <div id="comment-list"></div>
+        </div>
+      </aside>
+
+      <main>
+        <div id="diff-bar">
+          <button id="overview-btn" class="hidden" title="Back to the overview of all changes (Esc)">☰ All changes</button>
+          <button id="copy-btn" class="repo-only" title="Copy this diff, file status and comments as Markdown (to paste into an LLM)">⧉ Copy for LLM</button>
+          <span id="diff-title" class="muted"></span>
+          <span class="spacer"></span>
+          <span id="diff-actions"></span>
+        </div>
+        <div id="diff"></div>
+        <div id="placeholder" class="muted">Open a project (Ctrl+R) and pick a changed file.</div>
+        <!-- Shown when no file is selected: every file's changed chunks. -->
+        <div id="overview" class="hidden"></div>
+      </main>
+    </div>
+
+    <pre id="output" class="hidden"></pre>
+    <footer>
+      <span id="status-text">Ready</span>
+      <span class="spacer"></span>
+      <button id="output-btn" class="link">Output</button>
+    </footer>
+    </div>
+
+    <dialog id="input-dialog">
+      <form method="dialog">
+        <label id="input-label" for="input-value"></label>
+        <input id="input-value" autocomplete="off" spellcheck="false" />
+        <div class="row end">
+          <button id="input-cancel" type="button">Cancel</button>
+          <button value="ok" class="primary">OK</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Asked before every Git command that changes something. -->
+    <!-- Modes (class on the dialog): prompting → running → finished. -->
+    <dialog id="remote-dialog">
+      <form method="dialog" novalidate>
+        <strong id="remote-dialog-title">Add remote</strong>
+        <label class="field">Name <input id="remote-name" placeholder="origin" autocomplete="off" spellcheck="false" /></label>
+        <label class="field">URL <input id="remote-url" placeholder="https://github.com/owner/repo.git" autocomplete="off" spellcheck="false" /></label>
+        <label class="small" id="remote-fetch-row"><input type="checkbox" id="remote-fetch" checked /> Fetch from it after adding</label>
+        <p class="small muted">HTTPS or SSH URL (e.g. git@github.com:owner/repo.git), or a local path. Sign-in for private repositories is handled by Git Credential Manager on the first fetch or push.</p>
+        <div id="remote-error" class="small err"></div>
+        <div class="row end">
+          <button id="remote-cancel" type="button">Cancel</button>
+          <button id="remote-save" type="button" class="primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="comment-dialog">
+      <form method="dialog" novalidate>
+        <strong id="comment-dialog-title">Add comment</strong>
+        <pre id="comment-line"></pre>
+        <textarea id="comment-text" rows="5" placeholder="Your comment (Ctrl+Enter to save)"></textarea>
+        <p class="small muted">Stored only on this machine, in this repository's .diffpane folder; never committed.</p>
+        <div class="row end">
+          <button id="comment-cancel" type="button">Cancel</button>
+          <button id="comment-save" type="button" class="primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="git-dialog">
+      <form method="dialog">
+        <strong id="git-dialog-title">Run this Git command?</strong>
+        <div id="git-action" class="small muted"></div>
+        <div class="git-prompt">
+          <pre id="git-cmd"></pre>
+          <div id="git-info" class="small"></div>
+          <div id="git-extra" class="small muted"></div>
+          <label class="small"><input type="checkbox" id="git-all" /> Don't ask again for the rest of this action</label>
+        </div>
+        <!-- Transcript of what ran in this action, with live output. -->
+        <pre id="git-log" class="hidden"></pre>
+        <div id="git-state" class="small"></div>
+        <div class="row end">
+          <button id="git-hide" type="button" title="Close this window; the command keeps running">Hide</button>
+          <button id="git-cancel" type="button">Cancel</button>
+          <button id="git-run" type="button" class="primary">Run</button>
+          <button id="git-close" value="close" class="primary">Close</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="script-dialog">
+      <form method="dialog" novalidate>
+        <strong id="script-dialog-title">Add script</strong>
+        <label class="field">Name <input id="script-name" placeholder="Run API, Tests, Dev server…" autocomplete="off" /></label>
+        <label class="field">
+          Where it is
+          <span class="row">
+            <input id="script-path" class="spacer" placeholder="C:\path\to\script.ps1" autocomplete="off" spellcheck="false" />
+            <button id="script-browse" type="button">Browse…</button>
+          </span>
+        </label>
+        <p class="small muted">
+          Runs in a new console window, in this repository's folder. .ps1 with PowerShell, .cmd/.bat with cmd,
+          .sh with Git Bash, .py with python, .js with node; other files with their Windows default program.
+        </p>
+        <div id="script-error" class="small err"></div>
+        <div class="row end">
+          <button id="script-cancel" type="button">Cancel</button>
+          <button id="script-save" type="button" class="primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="user-dialog">
+      <form method="dialog" novalidate>
+        <strong id="user-dialog-title">New Git user</strong>
+        <label class="field">Tab label <input id="user-label" placeholder="Work, Personal…" autocomplete="off" /></label>
+        <label class="field">Commit author name <input id="user-name" autocomplete="off" spellcheck="false" /></label>
+        <label class="field">Commit author email <input id="user-email" type="email" autocomplete="off" spellcheck="false" /></label>
+        <p class="small muted">
+          Used for commits in this user's repositories. Diffpane passes it on each git command, so nothing is written
+          inside the repositories. Leave name and email empty to use your global Git identity.
+        </p>
+        <div id="user-error" class="small err"></div>
+        <div class="row end">
+          <button id="user-cancel" type="button">Cancel</button>
+          <button value="ok" class="primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="projects-dialog" class="picker">
+      <input id="projects-filter" placeholder="Search projects…" autocomplete="off" spellcheck="false" />
+      <div id="projects-list"></div>
+      <div class="row">
+        <button id="projects-open">Open folder…</button>
+        <button id="projects-clone">Clone…</button>
+        <span class="spacer"></span>
+        <button id="projects-close">Close</button>
+      </div>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

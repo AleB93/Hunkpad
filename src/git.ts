@@ -1,0 +1,672 @@
+// All Git logic. Talks to the native side only through `run_git`,
+// `read_file` and `write_file` (src-tauri/src/lib.rs).
+
+import { invoke } from "@tauri-apps/api/core";
+
+export interface GitOutput {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+export class GitError extends Error {
+  constructor(readonly args: string[], readonly output: GitOutput) {
+    super(output.stderr.trim() || output.stdout.trim() || `git ${args[0]} exited with code ${output.code}`);
+  }
+}
+
+/** The folder is neither a repository nor inside one. */
+export class NotARepoError extends Error {
+  constructor(readonly path: string) {
+    super(`${path} is not a Git repository`);
+  }
+}
+
+interface RunOptions {
+  stdin?: string;
+  /** Return a non-zero exit instead of throwing. */
+  allowFail?: boolean;
+  /** Keep read-only commands out of the output log. */
+  quiet?: boolean;
+  /** Use this temporary index instead of the repository's (GIT_INDEX_FILE). */
+  indexFile?: string;
+}
+
+type Logger = (text: string, isError: boolean) => void;
+let logger: Logger = () => {};
+export function setLogger(fn: Logger) {
+  logger = fn;
+}
+
+/** A command about to run that changes something (see setApprover). */
+export interface PendingCommand {
+  cwd: string;
+  args: string[];
+  stdin?: string;
+  indexFile?: string;
+}
+
+/** The user said no to a command: the action stops, nothing else runs. */
+export class CancelledError extends Error {
+  constructor() {
+    super("Cancelled");
+  }
+}
+
+type Approver = (cmd: PendingCommand) => Promise<boolean>;
+let approver: Approver | null = null;
+/** Asked before every non-quiet (state-changing) command; read-only commands are `quiet`. */
+export function setApprover(fn: Approver | null) {
+  approver = fn;
+}
+
+/** Told when an approved command starts and ends; its live output arrives as `git-output` events. */
+export interface RunObserver {
+  started(id: number, cmd: PendingCommand): void;
+  finished(id: number, result: GitOutput | null, ms: number): void;
+}
+let observer: RunObserver | null = null;
+export function setRunObserver(o: RunObserver | null) {
+  observer = o;
+}
+let nextStreamId = 1;
+
+export async function runGit(cwd: string, args: string[], opts: RunOptions = {}): Promise<GitOutput> {
+  let streamId: number | null = null;
+  if (!opts.quiet && approver) {
+    const cmd = { cwd, args, stdin: opts.stdin, indexFile: opts.indexFile };
+    const ok = await approver(cmd);
+    if (!ok) throw new CancelledError();
+    if (observer) {
+      streamId = nextStreamId++;
+      observer.started(streamId, cmd);
+    }
+  }
+  const t0 = performance.now();
+  let out: GitOutput;
+  try {
+    out = await invoke<GitOutput>("run_git", {
+      cwd,
+      args,
+      stdin: opts.stdin ?? null,
+      indexFile: opts.indexFile ?? null,
+      streamId,
+    });
+  } catch (e) {
+    if (streamId !== null) observer?.finished(streamId, null, performance.now() - t0);
+    throw e;
+  }
+  if (streamId !== null) observer?.finished(streamId, out, performance.now() - t0);
+  const failed = out.code !== 0;
+  if (!opts.quiet || (failed && !opts.allowFail)) {
+    const detail = [out.stdout, out.stderr].map((s) => s.trim()).filter(Boolean).join("\n");
+    logger(`> git ${args.join(" ")}${detail ? `\n${detail}` : ""}`, failed && !opts.allowFail);
+  }
+  if (failed && !opts.allowFail) throw new GitError(args, out);
+  return out;
+}
+
+/** Hash of the empty tree: the "parent" of a root commit. */
+export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+export type Operation = "merge" | "rebase" | "cherry-pick" | "revert";
+
+const OPERATION_REFS: [Operation, string][] = [
+  ["merge", "MERGE_HEAD"],
+  ["rebase", "REBASE_HEAD"],
+  ["cherry-pick", "CHERRY_PICK_HEAD"],
+  ["revert", "REVERT_HEAD"],
+];
+
+export interface FileChange {
+  path: string;
+  /** Source path of a staged rename or copy. */
+  origPath: string | null;
+  /** Index status letter (M, A, D, R, C, T), null when unchanged. */
+  staged: string | null;
+  /** Work-tree status letter; "U" means untracked. */
+  unstaged: string | null;
+  /** Unmerged XY code (UU, AA, DU…), null when not conflicted. */
+  conflict: string | null;
+}
+
+export interface RepoStatus {
+  branch: string | null;
+  /** null on an unborn branch (no commits yet). */
+  oid: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  operation: Operation | null;
+  files: FileChange[];
+}
+
+export interface Ref {
+  kind: "local" | "remote" | "tag";
+  name: string;
+  sha: string;
+  upstream: string;
+  current: boolean;
+}
+
+export interface Commit {
+  sha: string;
+  shortSha: string;
+  parents: string[];
+  author: string;
+  date: Date;
+  refs: string;
+  subject: string;
+}
+
+export interface Stash {
+  ref: string;
+  message: string;
+}
+
+export interface CommitEntry {
+  path: string;
+  content?: string;
+  deleted?: boolean;
+}
+
+export interface Remote {
+  name: string;
+  fetchUrl: string;
+  /** Usually the same as fetchUrl. */
+  pushUrl: string;
+}
+
+export interface ChangedFile {
+  status: string;
+  path: string;
+  origPath: string | null;
+}
+
+/** Splits on `sep` at most `n - 1` times; the last part keeps the remainder. */
+function splitN(s: string, sep: string, n: number): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  for (let k = 0; k < n - 1; k++) {
+    const j = s.indexOf(sep, start);
+    if (j < 0) break;
+    parts.push(s.slice(start, j));
+    start = j + 1;
+  }
+  parts.push(s.slice(start));
+  return parts;
+}
+
+const letter = (c: string) => (c === "." ? null : c);
+
+function parseStatus(out: string): RepoStatus {
+  const status: RepoStatus = {
+    branch: null,
+    oid: null,
+    upstream: null,
+    ahead: 0,
+    behind: 0,
+    operation: null,
+    files: [],
+  };
+  const tokens = out.split("\0");
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (!t) continue;
+    if (t.startsWith("# ")) {
+      const [, key, value] = splitN(t, " ", 3);
+      if (key === "branch.oid") status.oid = value === "(initial)" ? null : value;
+      else if (key === "branch.head") status.branch = value === "(detached)" ? null : value;
+      else if (key === "branch.upstream") status.upstream = value;
+      else if (key === "branch.ab") {
+        const m = /\+(\d+) -(\d+)/.exec(value);
+        if (m) [status.ahead, status.behind] = [Number(m[1]), Number(m[2])];
+      }
+      continue;
+    }
+    switch (t[0]) {
+      case "1": {
+        const p = splitN(t, " ", 9);
+        status.files.push({ path: p[8], origPath: null, staged: letter(p[1][0]), unstaged: letter(p[1][1]), conflict: null });
+        break;
+      }
+      case "2": {
+        // Renames/copies carry the original path in the next NUL-separated token.
+        const p = splitN(t, " ", 10);
+        const origPath = tokens[++i];
+        status.files.push({ path: p[9], origPath, staged: letter(p[1][0]), unstaged: letter(p[1][1]), conflict: null });
+        break;
+      }
+      case "u": {
+        const p = splitN(t, " ", 11);
+        status.files.push({ path: p[10], origPath: null, staged: null, unstaged: null, conflict: p[1] });
+        break;
+      }
+      case "?":
+        status.files.push({ path: t.slice(2), origPath: null, staged: null, unstaged: "U", conflict: null });
+        break;
+    }
+  }
+  return status;
+}
+
+function parseNameStatus(out: string): ChangedFile[] {
+  const tokens = out.split("\0");
+  const files: ChangedFile[] = [];
+  for (let i = 0; i < tokens.length && tokens[i]; ) {
+    const code = tokens[i];
+    if (code[0] === "R" || code[0] === "C") {
+      files.push({ status: code[0], origPath: tokens[i + 1], path: tokens[i + 2] });
+      i += 3;
+    } else {
+      files.push({ status: code[0], origPath: null, path: tokens[i + 1] });
+      i += 2;
+    }
+  }
+  return files;
+}
+
+export class Repo {
+  /** Extra `-c key=value` settings for every command (the active Git user's identity). */
+  config: string[] = [];
+
+  private constructor(readonly root: string) {}
+
+  static async open(path: string): Promise<Repo> {
+    const args = ["rev-parse", "--show-toplevel"];
+    const out = await runGit(path, args, { quiet: true, allowFail: true });
+    if (out.code !== 0) {
+      if (/not a git repository/i.test(out.stderr)) throw new NotARepoError(path);
+      throw new GitError(args, out);
+    }
+    return new Repo(out.stdout.trim());
+  }
+
+  get name(): string {
+    return this.root.split("/").pop() || this.root;
+  }
+
+  private git(args: string[], opts?: RunOptions) {
+    return runGit(this.root, [...this.config, ...args], opts);
+  }
+
+  /** Effective config value in this repo (including `config` overrides), or "" if unset. */
+  async configValue(key: string): Promise<string> {
+    return (await this.read(["config", "--get", key], true)).trim();
+  }
+
+  private async read(args: string[], allowFail = false): Promise<string> {
+    const out = await this.git(args, { quiet: true, allowFail });
+    return out.code === 0 ? out.stdout : "";
+  }
+
+  // ---- status -----------------------------------------------------------
+
+  async status(): Promise<RepoStatus> {
+    const statusOut = this.read(["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"]);
+    const ops = Promise.all(
+      OPERATION_REFS.map(([, ref]) => this.git(["rev-parse", "-q", "--verify", ref], { quiet: true, allowFail: true })),
+    );
+    const status = parseStatus(await statusOut);
+    const found = (await ops).findIndex((o) => o.code === 0);
+    status.operation = found >= 0 ? OPERATION_REFS[found][0] : null;
+    return status;
+  }
+
+  // ---- file contents ----------------------------------------------------
+
+  /** Blob content in repository form (`<rev>:<path>`, `:<path>` = index), null if absent. */
+  async show(spec: string): Promise<string | null> {
+    const out = await this.git(["cat-file", "blob", spec], { quiet: true, allowFail: true });
+    return out.code === 0 ? out.stdout : null;
+  }
+
+  /** Blob content converted to work-tree form (line endings, filters), so it compares cleanly with the file on disk. */
+  async showAsWorktree(spec: string): Promise<string | null> {
+    const out = await this.git(["cat-file", "--filters", spec], { quiet: true, allowFail: true });
+    return out.code === 0 ? out.stdout : null;
+  }
+
+  readWorktree(path: string): Promise<string | null> {
+    return invoke<string | null>("read_file", { repo: this.root, path });
+  }
+
+  writeWorktree(path: string, content: string): Promise<void> {
+    return invoke("write_file", { repo: this.root, path, content });
+  }
+
+  /** Replaces a file's staged content without touching the work tree (used for line-level staging). */
+  async setIndexContent(path: string, content: string): Promise<void> {
+    const ls = await this.read(["ls-files", "-s", "--", path]);
+    const mode = ls.split(" ")[0] || "100644";
+    // --path applies the clean filters, so work-tree line endings are normalised.
+    const hash = await this.git(["hash-object", "-w", "--stdin", `--path=${path}`], { stdin: content, quiet: true });
+    await this.git(["update-index", "--add", "--cacheinfo", `${mode},${hash.stdout.trim()},${path}`]);
+  }
+
+  // ---- staging ----------------------------------------------------------
+
+  async stage(paths: string[]) {
+    if (paths.length) await this.git(["add", "-A", "--", ...paths]);
+  }
+
+  async unstage(paths: string[], unborn: boolean) {
+    if (!paths.length) return;
+    // Without a first commit there is no HEAD to restore from.
+    await this.git(unborn ? ["rm", "--cached", "-r", "-q", "--", ...paths] : ["restore", "--staged", "--", ...paths]);
+  }
+
+  async discard(tracked: string[], untracked: string[]) {
+    if (tracked.length) await this.git(["restore", "--worktree", "--", ...tracked]);
+    if (untracked.length) await this.git(["clean", "-f", "-q", "--", ...untracked]);
+  }
+
+  async acceptConflict(path: string, side: "ours" | "theirs") {
+    await this.git(["checkout", `--${side}`, "--", path]);
+    await this.stage([path]);
+  }
+
+  // ---- commits ----------------------------------------------------------
+
+  async commit(message: string, amend: boolean) {
+    await this.git(["commit", "-F", "-", ...(amend ? ["--amend"] : [])], { stdin: message });
+  }
+
+  /** Full patch with 3 lines of context: staged (HEAD → index) or unstaged (index → work tree). */
+  diffPatch(staged: boolean, paths: string[] = []): Promise<string> {
+    const args = ["diff", "-U3", "--no-color", "--no-ext-diff", ...(staged ? ["--cached"] : [])];
+    return this.read(paths.length ? [...args, "--", ...paths] : args, true);
+  }
+
+  /** An untracked file as a "new file" diff (against nothing). */
+  async untrackedPatch(path: string): Promise<string> {
+    // --no-index exits with 1 when the files differ, which is always here.
+    const out = await this.git(["diff", "--no-index", "-U3", "--no-color", "--no-ext-diff", "--", "/dev/null", path], {
+      quiet: true,
+      allowFail: true,
+    });
+    return out.stdout;
+  }
+
+  /** Diff of one file between two revisions (history view). */
+  revPatch(left: string, right: string, path: string): Promise<string> {
+    return this.read(["diff", "-U3", "--no-color", "--no-ext-diff", left, right, "--", path], true);
+  }
+
+  /** A commit: header (author, date, message) and its full patch. */
+  async commitPatch(sha: string): Promise<{ header: string; patch: string }> {
+    const header = await this.read(["log", "-1", "--format=commit %H%nAuthor: %an <%ae>%nDate:   %ad%n%n%B", sha], true);
+    const patch = await this.read(["show", "--format=", "-U3", "--no-color", "--no-ext-diff", sha], true);
+    return { header: header.trim(), patch };
+  }
+
+  /** Unstaged changes (index → work tree) as zero-context hunks, for block-level groups. */
+  diffU0(): Promise<string> {
+    return this.read(["diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames"]);
+  }
+
+  /**
+   * Commits exactly `entries` on top of HEAD, built in a temporary index outside
+   * the repository, so whatever else is staged stays staged. Hooks run as usual.
+   * Afterwards the real index takes the committed version of those files.
+   *   content: the file's new content; deleted: remove it; neither: take the work-tree file.
+   */
+  async commitEntries(message: string, entries: CommitEntry[], unborn: boolean) {
+    const tmp = await invoke<string>("temp_index_path");
+    const temp = { quiet: true, indexFile: tmp };
+    try {
+      await this.git(unborn ? ["read-tree", "--empty"] : ["read-tree", "HEAD"], temp);
+      const updates: string[][] = [];
+      for (const e of entries) {
+        if (e.deleted) {
+          updates.push(["update-index", "--force-remove", "--", e.path]);
+          continue;
+        }
+        const mode = (await this.read(["ls-files", "-s", "--", e.path])).split(" ")[0] || "100644";
+        // --path applies the repo's filters (line endings) like `git add` would.
+        const hashed =
+          e.content === undefined
+            ? await this.git(["hash-object", "-w", "--", e.path], { quiet: true })
+            : await this.git(["hash-object", "-w", "--stdin", `--path=${e.path}`], { quiet: true, stdin: e.content });
+        updates.push(["update-index", "--add", "--cacheinfo", `${mode},${hashed.stdout.trim()},${e.path}`]);
+      }
+      for (const u of updates) await this.git(u, temp);
+      await this.git(["commit", "-F", "-"], { stdin: message, indexFile: tmp });
+      // The real index now agrees with the new commit for these files
+      // (not quiet: it changes the repository's index, so it is shown and approved).
+      for (const u of updates) await this.git(u);
+    } finally {
+      await invoke("remove_temp_index", { path: tmp }).catch(() => {});
+    }
+  }
+
+  lastCommitMessage(): Promise<string> {
+    return this.read(["log", "-1", "--format=%B"], true).then((s) => s.trim());
+  }
+
+  async continueOperation(op: Operation) {
+    await this.git(op === "merge" ? ["commit", "--no-edit"] : [op, "--continue"]);
+  }
+
+  async abortOperation(op: Operation) {
+    await this.git([op, "--abort"]);
+  }
+
+  async skipRebaseStep() {
+    await this.git(["rebase", "--skip"]);
+  }
+
+  async undoLastCommit() {
+    await this.git(["reset", "--soft", "HEAD~1"]);
+  }
+
+  // ---- branches & tags --------------------------------------------------
+
+  async refs(): Promise<Ref[]> {
+    const out = await this.read([
+      "for-each-ref",
+      "--format=%(refname)%00%(refname:short)%00%(objectname:short)%00%(upstream:short)%00%(HEAD)",
+      "refs/heads",
+      "refs/remotes",
+      "refs/tags",
+    ]);
+    return out
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const [full, name, sha, upstream, head] = line.split("\0");
+        const kind: Ref["kind"] = full.startsWith("refs/heads/") ? "local" : full.startsWith("refs/remotes/") ? "remote" : "tag";
+        return { kind, name, sha, upstream, current: head === "*", full };
+      })
+      .filter((r) => !(r.kind === "remote" && r.full.endsWith("/HEAD")))
+      .map(({ full: _full, ...ref }) => ref);
+  }
+
+  async remotes(): Promise<string[]> {
+    return (await this.read(["remote"])).split("\n").filter(Boolean);
+  }
+
+  /** Remotes with their fetch and push URLs (`git remote -v`). */
+  async remoteList(): Promise<Remote[]> {
+    const map = new Map<string, Remote>();
+    for (const line of (await this.read(["remote", "-v"])).split("\n")) {
+      const m = /^(\S+)\t(.+?) \((fetch|push)\)$/.exec(line.trim());
+      if (!m) continue;
+      const r = map.get(m[1]) ?? { name: m[1], fetchUrl: "", pushUrl: "" };
+      if (m[3] === "fetch") r.fetchUrl = m[2];
+      else r.pushUrl = m[2];
+      map.set(m[1], r);
+    }
+    return [...map.values()];
+  }
+
+  async addRemote(name: string, url: string) {
+    await this.git(["remote", "add", name, url]);
+  }
+
+  async setRemoteUrl(name: string, url: string) {
+    await this.git(["remote", "set-url", name, url]);
+  }
+
+  async renameRemote(oldName: string, newName: string) {
+    await this.git(["remote", "rename", oldName, newName]);
+  }
+
+  async removeRemote(name: string) {
+    await this.git(["remote", "remove", name]);
+  }
+
+  async fetchRemote(name: string) {
+    await this.git(["fetch", "--prune", "--progress", name]);
+  }
+
+  async checkout(ref: string) {
+    await this.git(["checkout", ref]);
+  }
+
+  async checkoutDetached(ref: string) {
+    await this.git(["checkout", "--detach", ref]);
+  }
+
+  /** Checks out a remote branch as a new local tracking branch. */
+  async checkoutTracking(remoteRef: string) {
+    await this.git(["checkout", "--track", remoteRef]);
+  }
+
+  async createBranch(name: string, startPoint?: string) {
+    await this.git(["checkout", "-b", name, ...(startPoint ? [startPoint] : [])]);
+  }
+
+  async renameBranch(oldName: string, newName: string) {
+    await this.git(["branch", "-m", oldName, newName]);
+  }
+
+  async deleteBranch(name: string, force: boolean) {
+    await this.git(["branch", force ? "-D" : "-d", name]);
+  }
+
+  async deleteRemoteBranch(remoteRef: string) {
+    const slash = remoteRef.indexOf("/");
+    await this.git(["push", remoteRef.slice(0, slash), "--delete", remoteRef.slice(slash + 1)]);
+  }
+
+  async merge(ref: string) {
+    await this.git(["merge", "--no-edit", ref]);
+  }
+
+  async rebase(ref: string) {
+    await this.git(["rebase", ref]);
+  }
+
+  async createTag(name: string, message: string | null, ref?: string) {
+    const target = ref ? [ref] : [];
+    await this.git(message ? ["tag", "-a", name, "-m", message, ...target] : ["tag", name, ...target]);
+  }
+
+  async deleteTag(name: string) {
+    await this.git(["tag", "-d", name]);
+  }
+
+  async pushTag(name: string) {
+    const [remote] = await this.remotes();
+    if (!remote) throw new Error("No remote configured");
+    await this.git(["push", remote, `refs/tags/${name}`]);
+  }
+
+  // ---- remotes ----------------------------------------------------------
+
+  async fetch() {
+    await this.git(["fetch", "--all", "--prune", "--progress"]);
+  }
+
+  async pull(rebase = false) {
+    await this.git(["pull", "--progress", rebase ? "--rebase" : "--no-edit"]);
+  }
+
+  async push(hasUpstream: boolean, force = false) {
+    if (hasUpstream) {
+      await this.git(["push", "--progress", "--follow-tags", ...(force ? ["--force-with-lease"] : [])]);
+      return;
+    }
+    // First push of a branch: publish it and set the upstream.
+    const [remote] = await this.remotes();
+    if (!remote) throw new Error("No remote configured");
+    await this.git(["push", "--progress", "-u", remote, "HEAD"]);
+  }
+
+  // ---- stashes ----------------------------------------------------------
+
+  async stashes(): Promise<Stash[]> {
+    const out = await this.read(["stash", "list", "--format=%gd%x00%s"], true);
+    return out
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const [ref, message] = line.split("\0");
+        return { ref, message };
+      });
+  }
+
+  async stash(message: string | null, includeUntracked: boolean) {
+    await this.git(["stash", "push", ...(includeUntracked ? ["-u"] : []), ...(message ? ["-m", message] : [])]);
+  }
+
+  async stashApply(ref: string, pop: boolean) {
+    await this.git(["stash", pop ? "pop" : "apply", ref]);
+  }
+
+  async stashDrop(ref: string) {
+    await this.git(["stash", "drop", ref]);
+  }
+
+  // ---- history ----------------------------------------------------------
+
+  async log(skip: number, limit: number): Promise<Commit[]> {
+    const out = await this.read(
+      ["log", "--format=%H%x00%h%x00%P%x00%an%x00%at%x00%D%x00%s", `--skip=${skip}`, "-n", String(limit)],
+      true, // fails on an unborn branch
+    );
+    return out
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const [sha, shortSha, parents, author, at, refs, subject] = line.split("\0");
+        return {
+          sha,
+          shortSha,
+          parents: parents ? parents.split(" ") : [],
+          author,
+          date: new Date(Number(at) * 1000),
+          refs,
+          subject,
+        };
+      });
+  }
+
+  async commitMessage(rev: string): Promise<string> {
+    return (await this.read(["log", "-1", "--format=%B", rev], true)).trim();
+  }
+
+  async changedFiles(left: string, right: string): Promise<ChangedFile[]> {
+    return parseNameStatus(await this.read(["diff", "--name-status", "-z", "-M", left, right]));
+  }
+
+  async cherryPick(sha: string) {
+    await this.git(["cherry-pick", sha]);
+  }
+
+  async revert(sha: string) {
+    await this.git(["revert", "--no-edit", sha]);
+  }
+
+  async reset(sha: string, mode: "soft" | "mixed" | "hard") {
+    await this.git(["reset", `--${mode}`, sha]);
+  }
+}
+
+/** Clones `url` into `parentDir` and returns the new repository path. */
+export async function cloneRepo(parentDir: string, url: string): Promise<string> {
+  const name = url.replace(/[\\/]+$/, "").split(/[\\/:]/).pop()!.replace(/\.git$/, "");
+  await runGit(parentDir, ["clone", "--progress", url, name]);
+  return `${parentDir.replace(/[\\/]+$/, "")}/${name}`;
+}

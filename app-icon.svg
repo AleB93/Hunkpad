@@ -1,0 +1,23 @@
+<!-- Diffpane icon: 16x16 pixel art (retro "two panes" diff window).
+     The animated in-app version lives in index.html (#logo). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+  <!-- body with pixel-rounded corners -->
+  <path fill="#1a1c2c" d="M1 0h14v1h1v14h-1v1H1v-1H0V1h1z"/>
+  <!-- title bar: three window dots + bar -->
+  <rect x="2" y="2" width="1" height="1" fill="#ff004d"/>
+  <rect x="3" y="2" width="1" height="1" fill="#ffa300"/>
+  <rect x="4" y="2" width="1" height="1" fill="#00e436"/>
+  <rect x="6" y="2" width="8" height="1" fill="#333c57"/>
+  <!-- divider between the two panes -->
+  <rect x="7" y="4" width="2" height="10" fill="#262b44"/>
+  <!-- left pane: removed (red) and unchanged (grey) lines -->
+  <rect x="2" y="5" width="5" height="1" fill="#ff004d"/>
+  <rect x="2" y="7" width="3" height="1" fill="#5f574f"/>
+  <rect x="2" y="9" width="4" height="1" fill="#ff004d"/>
+  <!-- right pane: added (green) and unchanged (grey) lines, cursor -->
+  <rect x="9" y="5" width="5" height="1" fill="#00e436"/>
+  <rect x="9" y="7" width="3" height="1" fill="#5f574f"/>
+  <rect x="9" y="9" width="5" height="1" fill="#00e436"/>
+  <rect x="9" y="11" width="4" height="1" fill="#00e436"/>
+  <rect x="13" y="11" width="1" height="2" fill="#ffec27"/>
+</svg>
