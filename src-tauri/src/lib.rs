@@ -28,8 +28,83 @@ struct GitOutput {
     stderr: String,
 }
 
+/// Error text the frontend recognises as "Git is missing".
+const GIT_NOT_FOUND: &str = "GIT_NOT_FOUND";
+
+/// The git executable in use; found once, re-checked by `git_version`.
+static GIT_EXE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+fn hidden(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// `git` from PATH, else Git for Windows' usual install folders. The fallback
+/// matters right after installing Git: a running app still has the old PATH.
+fn find_git() -> Option<PathBuf> {
+    let works = |exe: &Path| {
+        hidden(Command::new(exe).arg("--version"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if works(Path::new("git")) {
+        return Some(PathBuf::from("git"));
+    }
+    #[cfg(windows)]
+    {
+        let mut candidates = Vec::new();
+        for var in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
+            if let Ok(dir) = std::env::var(var) {
+                candidates.push(PathBuf::from(dir).join(r"Git\cmd\git.exe"));
+            }
+        }
+        if let Ok(dir) = std::env::var("LOCALAPPDATA") {
+            candidates.push(PathBuf::from(dir).join(r"Programs\Git\cmd\git.exe"));
+        }
+        if let Some(found) = candidates.into_iter().find(|c| c.is_file() && works(c)) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// The executable to run (detected on first use).
+fn git_exe() -> PathBuf {
+    let mut cached = GIT_EXE.lock().unwrap();
+    if cached.is_none() {
+        *cached = find_git();
+    }
+    cached.clone().unwrap_or_else(|| PathBuf::from("git"))
+}
+
+/// Looks for Git again (e.g. after installing it) and returns its version
+/// ("git version 2.45.2.windows.1"), or None if it is not installed.
+#[tauri::command]
+fn git_version() -> Option<String> {
+    let found = find_git();
+    *GIT_EXE.lock().unwrap() = found.clone();
+    let out = hidden(Command::new(found?).arg("--version")).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Opens Git for Windows' download page in the default browser (only that page).
+#[tauri::command]
+fn open_git_download() -> Result<(), String> {
+    hidden(Command::new("explorer.exe").arg("https://git-scm.com/download/win"))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 fn git_command(cwd: &str) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = Command::new(git_exe());
     cmd.current_dir(cwd)
         .args(["-c", "core.quotepath=false", "-c", "color.ui=false"])
         // Never block on a terminal prompt; Git Credential Manager still shows its own window.
@@ -119,7 +194,13 @@ async fn run_git(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("failed to run git: {e}"))?;
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    GIT_NOT_FOUND.to_string()
+                } else {
+                    format!("failed to run git: {e}")
+                }
+            })?;
         if let Some(input) = stdin {
             let mut pipe = child.stdin.take().expect("stdin is piped");
             // Written from another thread so a large stdout cannot deadlock us.
@@ -320,6 +401,76 @@ fn find_child_repos(path: String) -> Vec<String> {
     repos
 }
 
+/// Writes `content` to `<temp>/diffpane-exports/<name>` and puts that file on
+/// the clipboard, so pasting into a chat attaches it as a file. Exports older
+/// than 7 days are deleted first. Returns the file's path.
+#[tauri::command]
+fn copy_as_file(name: String, content: String) -> Result<String, String> {
+    // Only plain file-name characters: no folders, no surprises.
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '-' })
+        .collect();
+    let safe = safe.trim_matches(|c| c == '.' || c == '-');
+    if safe.is_empty() {
+        return Err("empty file name".into());
+    }
+    let dir = std::env::temp_dir().join("diffpane-exports");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+
+    let week = Duration::from_secs(7 * 24 * 3600);
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > week);
+            if old {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    let path = dir.join(safe);
+    std::fs::write(&path, content).map_err(|e| format!("{}: {e}", path.display()))?;
+    let path_str = path.to_string_lossy().into_owned();
+
+    #[cfg(windows)]
+    {
+        use clipboard_win::{options::DoClear, raw, Clipboard};
+        // Open the clipboard (retrying if another app holds it), empty it, and put
+        // just this file on it: otherwise older copied text would stay alongside
+        // and a chat could paste that instead of the file.
+        // Other apps (clipboard history, Teams…) briefly lock the clipboard right
+        // after it changes: retry with short pauses, ~1 s in total.
+        let mut opened = Clipboard::new();
+        for _ in 0..40 {
+            if opened.is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+            opened = Clipboard::new();
+        }
+        let _clip = opened.map_err(|e| format!("could not open the clipboard (another app is using it): {e}"))?;
+        raw::set_file_list_with(&[path_str.as_str()], DoClear)
+            .map_err(|e| format!("could not put the file on the clipboard: {e}"))?;
+    }
+    #[cfg(not(windows))]
+    return Err("copying as a file is only supported on Windows for now".into());
+
+    #[allow(unreachable_code)]
+    Ok(path_str)
+}
+
+/// For each path (relative to `base`, or absolute): whether it exists, as a file
+/// or a folder. Used to read Git's state files (e.g. `.git/rebase-merge`).
+#[tauri::command]
+fn paths_exist(base: String, paths: Vec<String>) -> Vec<bool> {
+    paths.iter().map(|p| Path::new(&base).join(p).exists()).collect()
+}
+
 /// Whether `path` is an existing file (used to validate a user script's location).
 #[tauri::command]
 fn is_file(path: String) -> bool {
@@ -415,7 +566,11 @@ pub fn run() {
             remove_temp_index,
             is_file,
             launch_script,
-            migrate_data_dir
+            migrate_data_dir,
+            paths_exist,
+            copy_as_file,
+            git_version,
+            open_git_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running Diffpane");

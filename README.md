@@ -36,6 +36,10 @@ component VS Code uses.
   everything in the overview), the ⧉ on Staged/Unstaged/Kept local, group and
   file menus, a commit's menu (message + diff) and the Comments tab. Kept local
   files are left out of broad copies (often local secrets).
+  By default it copies a **.md file** (Windows clipboard file, like Explorer's copy),
+  so pasting into a chat attaches it instead of a wall of text; files live in
+  `%TEMP%diffpane-exports` and are deleted after 7 days. ⋯ → "Copy for LLM as:
+  file · text" switches to plain text.
 - **Review comments** — comment any line on the right side of a diff (hover →
   ＋ in the margin, right-click → Add comment, or Ctrl+Alt+M). Shown under the
   line; a **Comments** tab lists them by file (Open / Resolved / Outdated / All),

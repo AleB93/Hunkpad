@@ -15,6 +15,19 @@ export class GitError extends Error {
   }
 }
 
+/** git.exe could not be started: Git for Windows is not installed (or not found). */
+export class GitNotFoundError extends Error {
+  constructor() {
+    super("Git was not found. Install Git for Windows (git-scm.com).");
+  }
+}
+
+let onGitMissing: () => void = () => {};
+/** Called whenever a command fails because Git is missing. */
+export function setGitMissingHandler(fn: () => void) {
+  onGitMissing = fn;
+}
+
 /** The folder is neither a repository nor inside one. */
 export class NotARepoError extends Error {
   constructor(readonly path: string) {
@@ -94,6 +107,10 @@ export async function runGit(cwd: string, args: string[], opts: RunOptions = {})
     });
   } catch (e) {
     if (streamId !== null) observer?.finished(streamId, null, performance.now() - t0);
+    if (String(e) === "GIT_NOT_FOUND") {
+      onGitMissing();
+      throw new GitNotFoundError();
+    }
     throw e;
   }
   if (streamId !== null) observer?.finished(streamId, out, performance.now() - t0);
@@ -111,12 +128,29 @@ export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 export type Operation = "merge" | "rebase" | "cherry-pick" | "revert";
 
-const OPERATION_REFS: [Operation, string][] = [
-  ["merge", "MERGE_HEAD"],
-  ["rebase", "REBASE_HEAD"],
-  ["cherry-pick", "CHERRY_PICK_HEAD"],
-  ["revert", "REVERT_HEAD"],
+/**
+ * The files Git itself uses to tell an operation is in progress (as `git status`
+ * does). A rebase is the `rebase-merge` / `rebase-apply` folder, not REBASE_HEAD,
+ * which can be left behind after a rebase finished elsewhere. `rebase-apply`
+ * with `applying` inside is `git am`, not a rebase.
+ */
+const OPERATION_PATHS = [
+  "rebase-merge",
+  "rebase-apply",
+  "rebase-apply/applying",
+  "MERGE_HEAD",
+  "CHERRY_PICK_HEAD",
+  "REVERT_HEAD",
 ];
+
+export function operationFrom(exists: boolean[]): Operation | null {
+  const [rebaseMerge, rebaseApply, amApplying, merge, cherryPick, revert] = exists;
+  if (rebaseMerge || (rebaseApply && !amApplying)) return "rebase";
+  if (merge) return "merge";
+  if (cherryPick) return "cherry-pick";
+  if (revert) return "revert";
+  return null;
+}
 
 export interface FileChange {
   path: string;
@@ -304,12 +338,15 @@ export class Repo {
 
   async status(): Promise<RepoStatus> {
     const statusOut = this.read(["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"]);
-    const ops = Promise.all(
-      OPERATION_REFS.map(([, ref]) => this.git(["rev-parse", "-q", "--verify", ref], { quiet: true, allowFail: true })),
-    );
+    // Where those state files live (--git-path also handles linked worktrees).
+    const where = this.read(["rev-parse", ...OPERATION_PATHS.flatMap((p) => ["--git-path", p])], true);
     const status = parseStatus(await statusOut);
-    const found = (await ops).findIndex((o) => o.code === 0);
-    status.operation = found >= 0 ? OPERATION_REFS[found][0] : null;
+    const paths = (await where).split("\n").map((p) => p.trim()).filter(Boolean);
+    const exists =
+      paths.length === OPERATION_PATHS.length
+        ? await invoke<boolean[]>("paths_exist", { base: this.root, paths })
+        : [];
+    status.operation = operationFrom(exists);
     return status;
   }
 

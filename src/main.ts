@@ -11,6 +11,7 @@ import {
   FileChange,
   CancelledError,
   GitError,
+  GitNotFoundError,
   PendingCommand,
   NotARepoError,
   Ref,
@@ -21,6 +22,7 @@ import {
   cloneRepo,
   runGit,
   setApprover,
+  setGitMissingHandler,
   setRunObserver,
   setLogger,
 } from "./git";
@@ -1135,11 +1137,56 @@ async function copyExport(
     for (const f of files) f.comments = byPath.get(f.path) ?? [];
   }
   const md = toMarkdown({ title: opts.title ?? `Changes in ${projectName(repo.root)}`, meta: repoMeta(scope), intro: opts.intro, files });
-  await navigator.clipboard.writeText(md);
   const comments = files.reduce((n, f) => n + f.comments.length, 0);
-  setStatus(
-    `Copied for LLM: ${files.length} file(s)${comments ? `, ${comments} comment(s)` : ""} · ${(md.length / 1024).toFixed(1)} KB`,
-  );
+  const summary = `${files.length} file(s)${comments ? `, ${comments} comment(s)` : ""} · ${(md.length / 1024).toFixed(1)} KB`;
+  if (copyAsFile) {
+    // A .md file on the clipboard: pasting into a chat attaches it instead of a wall of text.
+    const name = exportFileName(scope);
+    await invoke<string>("copy_as_file", { name, content: md });
+    setStatus(`Copied as file ${name} (${summary}): paste with Ctrl+V to attach it`);
+  } else {
+    await navigator.clipboard.writeText(md);
+    setStatus(`Copied for LLM as text: ${summary}`);
+  }
+}
+
+/** "Board.GenAI-group-wave-1-20261013-0912.md": repo, scope and time, file-name safe. */
+function exportFileName(scope: string): string {
+  const slug = (s: string) =>
+    s
+      .normalize("NFKD")
+      .replace(/[^\w.\-]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 48)
+      .toLowerCase();
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  const when = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+  const repoName = projectName(repo!.root).replace(/[^\w.\-]+/g, "-");
+  // Drop the "(Kept local files are left out)" style notes from the scope part.
+  return `${repoName}-${slug(scope.replace(/\(.*?\)/g, ""))}-${when}.md`;
+}
+
+function loadCopyAsFile(): boolean {
+  try {
+    return localStorage.getItem("copyMode") !== "text";
+  } catch {
+    return true;
+  }
+}
+
+/** "Copy for LLM" puts a .md file on the clipboard (default) or the plain text. */
+let copyAsFile = loadCopyAsFile();
+
+function setCopyAsFile(on: boolean) {
+  copyAsFile = on;
+  try {
+    localStorage.setItem("copyMode", on ? "file" : "text");
+  } catch {
+    // just won't be remembered
+  }
+  setStatus(on ? "Copy for LLM now copies a .md file (pastes as an attachment)" : "Copy for LLM now copies plain text");
 }
 
 /** Runs a copy, reporting errors in the status bar. */
@@ -3763,6 +3810,10 @@ function moreMenu(): MenuItem[] {
       label: `${confirmGit ? "✓ " : ""}Ask before Git commands`,
       run: () => setConfirmGit(!confirmGit),
     },
+    {
+      label: copyAsFile ? "Copy for LLM as: ✓ file  ·  text" : "Copy for LLM as: file  ·  ✓ text",
+      run: () => setCopyAsFile(!copyAsFile),
+    },
     { label: "Toggle output log", run: toggleOutput },
   ];
 }
@@ -3854,18 +3905,48 @@ function loadTabsData() {
 // Best effort: write pending changes before the window goes away.
 window.addEventListener("beforeunload", () => void flushAll());
 
+// ---- Git missing ------------------------------------------------------------
+
+const gitMissingDialog = $<HTMLDialogElement>("git-missing-dialog");
+
+/** Explains that Git for Windows is needed, with a download link and "Check again". */
+function showGitMissing() {
+  setStatus("Git was not found: install Git for Windows (git-scm.com)", true);
+  $("git-missing-state").textContent = "";
+  if (!gitMissingDialog.open) gitMissingDialog.showModal();
+}
+
+setGitMissingHandler(showGitMissing);
+$("git-missing-close").addEventListener("click", () => gitMissingDialog.close());
+$("git-missing-download").addEventListener("click", () => {
+  invoke("open_git_download").catch(showError);
+  $("git-missing-state").textContent = "Opened git-scm.com in your browser. After installing, click Check again.";
+});
+$("git-missing-check").addEventListener("click", async () => {
+  const version = await invoke<string | null>("git_version");
+  if (!version) {
+    $("git-missing-state").textContent = "Still not found. Finish the installation, then try again.";
+    return;
+  }
+  gitMissingDialog.close();
+  setStatus(`Found ${version}`);
+  await startup(); // now open the tabs that could not be opened before
+});
+
 // ---- startup --------------------------------------------------------------
 
 // Restore the Git users and the active user's tabs. A path on the command line
 // (e.g. an IDE external tool) is opened as a tab and wins; else the last active tab.
-(async () => {
+async function startup() {
   const users = loadUsers();
   gitUsers = users.users;
   activeUserId = users.active;
-  await loadGlobalIdentity().catch(showError);
   const saved = loadUserTabs(activeUserId);
   openTabs = saved.paths;
   renderTabs();
+  // Without Git nothing can be opened: say so, and keep every tab as it is.
+  if (!(await invoke<string | null>("git_version"))) return showGitMissing();
+  await loadGlobalIdentity().catch(showError);
   loadTabsData();
   const cli = await invoke<string | null>("initial_repo");
   const first = cli ?? saved.active ?? openTabs[0];
@@ -3874,7 +3955,9 @@ window.addEventListener("beforeunload", () => void flushAll());
     await openRepo(first);
   } catch (e) {
     showError(e);
-    // A remembered tab whose folder is gone is dropped.
-    if (!cli) closeTab(first);
+    // A remembered tab whose folder is gone is dropped (but not when Git is the problem).
+    if (!cli && !(e instanceof GitNotFoundError)) closeTab(first);
   }
-})();
+}
+
+startup().catch(showError);

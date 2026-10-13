@@ -174,6 +174,26 @@
 
     <!-- Asked before every Git command that changes something. -->
     <!-- Modes (class on the dialog): prompting → running → finished. -->
+    <dialog id="git-missing-dialog">
+      <form method="dialog">
+        <strong>Git was not found</strong>
+        <p class="small">
+          Diffpane uses <b>Git for Windows</b> to read and change your repositories, and it is not installed on this PC
+          (or Diffpane cannot find it).
+        </p>
+        <ol class="small">
+          <li>Download and install Git for Windows (the default options are fine).</li>
+          <li>Come back here and click <b>Check again</b>. No restart needed.</li>
+        </ol>
+        <div id="git-missing-state" class="small muted"></div>
+        <div class="row end">
+          <button id="git-missing-close" type="button">Close</button>
+          <button id="git-missing-check" type="button">Check again</button>
+          <button id="git-missing-download" type="button" class="primary">Download Git for Windows</button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="remote-dialog">
       <form method="dialog" novalidate>
         <strong id="remote-dialog-title">Add remote</strong>
