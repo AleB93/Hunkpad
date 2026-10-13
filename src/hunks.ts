@@ -55,7 +55,11 @@ export function wholeFileHunk(path: string, kind: "untracked" | "binary"): Hunk 
   return finish({ path, oldStart: 0, oldCount: 0, newStart: 0, newCount: 0, removed: [], added: [], whole: kind });
 }
 
-const unquote = (p: string) => (p.startsWith('"') && p.endsWith('"') ? p.slice(1, -1) : p);
+/** A path from a diff header. Git ends "--- a/x" / "+++ b/x" with a tab when the name has a space. */
+const unquote = (raw: string) => {
+  const p = raw.replace(/\t$/, "");
+  return p.startsWith('"') && p.endsWith('"') ? p.slice(1, -1) : p;
+};
 
 /** Parses `git diff -U0 --no-renames` output into hunks. */
 export function parseDiffU0(out: string): Hunk[] {

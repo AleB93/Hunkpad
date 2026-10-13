@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Builds the standalone Diffpane executable, without installers (--no-bundle).
+# Builds the standalone Hunkpad executable, without installers (--no-bundle).
 #
 # Usage (from anywhere):  bash scripts/build.sh
-# Output:                 src-tauri/target/release/diffpane  (diffpane.exe on Windows)
+# Output:                 src-tauri/target/release/hunkpad  (hunkpad.exe on Windows)
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -14,6 +14,6 @@ fi
 
 npx tauri build --no-bundle
 
-exe=src-tauri/target/release/diffpane
+exe=src-tauri/target/release/hunkpad
 [ -f "$exe.exe" ] && exe="$exe.exe"
 echo "Built: $(pwd)/$exe ($(du -h "$exe" | cut -f1))"

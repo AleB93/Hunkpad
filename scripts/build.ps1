@@ -1,9 +1,9 @@
-# Builds the standalone Diffpane executable, without installers (--no-bundle).
+# Builds the standalone Hunkpad executable, without installers (--no-bundle).
 # The interface is built into the .exe, so it runs on its own (needs Git and
 # WebView2, which Windows 11 includes).
 #
 # Usage (from anywhere):  powershell -ExecutionPolicy Bypass -File scripts\build.ps1
-# Output:                 src-tauri\target\release\diffpane.exe
+# Output:                 src-tauri\target\release\hunkpad.exe
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -19,7 +19,7 @@ try {
     & npx.cmd tauri build --no-bundle
     if ($LASTEXITCODE -ne 0) { throw "Build failed (exit $LASTEXITCODE)" }
 
-    $exe = Join-Path $root 'src-tauri\target\release\diffpane.exe'
+    $exe = Join-Path $root 'src-tauri\target\release\hunkpad.exe'
     $size = [math]::Round((Get-Item $exe).Length / 1MB, 1)
     Write-Host "Built: $exe ($size MB)" -ForegroundColor Green
 }

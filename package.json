@@ -1,12 +1,17 @@
 {
-  "name": "diffpane",
+  "name": "hunkpad",
   "private": true,
   "version": "0.1.0",
+  "description": "Lightweight Git client with VS Code-quality diffs, for Windows, macOS and Linux",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "typecheck": "tsc --noEmit",
+    "version": "node scripts/sync-version.mjs && git add src-tauri/Cargo.toml",
+    "test": "vitest run"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
@@ -16,6 +21,7 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
     "typescript": "^5.6.0",
-    "vite": "^6.0.0"
+    "vite": "^6.0.0",
+    "vitest": "^3.2.7"
   }
 }

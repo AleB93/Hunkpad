@@ -1,11 +1,11 @@
 [package]
-name = "diffpane"
+name = "hunkpad"
 version = "0.1.0"
-description = "Lightweight Git diff viewer"
+description = "Lightweight Git client with VS Code-quality diffs"
 edition = "2021"
 
 [lib]
-name = "diffpane_lib"
+name = "hunkpad_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -21,3 +21,9 @@ notify-debouncer-mini = "0.5"
 # "Copy for LLM" puts a file on the Windows clipboard (CF_HDROP), like Explorer's copy.
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4"
+
+# ...and on the macOS pasteboard (a file URL), like Finder's copy.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }

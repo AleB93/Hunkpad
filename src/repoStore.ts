@@ -1,21 +1,23 @@
-// Per-repository Diffpane data, stored inside the repository in `.diffpane/`:
+// Per-repository Hunkpad data, stored inside the repository in `.hunkpad/`:
 //
-//   .diffpane/.gitignore "*"  → Git ignores the whole folder (itself included),
+//   .hunkpad/.gitignore "*"  → Git ignores the whole folder (itself included),
 //                              so it is always kept local and never committed.
-//   .diffpane/state.json       colour, favourites, change groups, block
+//   .hunkpad/state.json       colour, favourites, change groups, block
 //                              assignments, Kept local list, scripts, comments.
 //
 // Reads happen once per repository (loadRepoData); after that the data is
 // served from memory and every change is written back shortly after (debounced,
 // and only when something actually changed). The folder is created on the
-// first real save. Data from older versions (kept in the app's localStorage)
-// moves into the folder the first time the repository is opened.
+// first real save. Data from older versions (kept in the app settings) moves
+// into the folder the first time the repository is opened.
 
 import { invoke } from "@tauri-apps/api/core";
 import type { ChangeGroup, HunkState, UserScript } from "./projects";
 import type { ReviewComment } from "./comments";
+import { pathKey } from "./platform";
+import { settings } from "./settings";
 
-export const DATA_DIR = ".diffpane";
+export const DATA_DIR = ".hunkpad";
 const STATE_FILE = `${DATA_DIR}/state.json`;
 const IGNORE_FILE = `${DATA_DIR}/.gitignore`;
 
@@ -53,12 +55,12 @@ interface Entry {
   /** state.json exists in the repository. */
   exists: boolean;
   timer?: number;
-  /** localStorage keys migrated into this repo; removed once safely written. */
+  /** Settings keys migrated into this repo; removed once safely written. */
   migrated: string[];
 }
 
 const cache = new Map<string, Entry>();
-const key = (root: string) => root.toLowerCase();
+const key = pathKey;
 
 let reportError: (message: string) => void = () => {};
 export function setRepoStoreErrorHandler(fn: (message: string) => void) {
@@ -66,7 +68,7 @@ export function setRepoStoreErrorHandler(fn: (message: string) => void) {
 }
 
 let onCreated: (root: string) => void = () => {};
-/** Called once when a repository's .diffpane folder is first written. */
+/** Called once when a repository's .hunkpad folder is first written. */
 export function setRepoStoreCreatedHandler(fn: (root: string) => void) {
   onCreated = fn;
 }
@@ -97,14 +99,14 @@ function normalize(raw: unknown): RepoData {
 
 function readLocal(k: string): unknown {
   try {
-    const raw = localStorage.getItem(k);
+    const raw = settings.getItem(k);
     return raw === null ? undefined : JSON.parse(raw);
   } catch {
     return undefined;
   }
 }
 
-/** Collects this repository's data from where older versions kept it (localStorage). */
+/** Collects this repository's data from where older versions kept it (the app settings). */
 function fromLocalStorage(root: string): { data: RepoData; keys: string[] } {
   const k = key(root);
   const keys = [`favourites:${k}`, `changeGroups:${k}`, `hunkGroups:${k}`, `keptLocal:${k}`, `scripts:${k}`];
@@ -127,10 +129,9 @@ export async function loadRepoData(root: string): Promise<RepoData> {
   if (cached) return cached.data;
   let text: string | null = null;
   try {
-    // The folder was first called .dspane: rename it if that is what this repo has.
-    if (await invoke<boolean>("migrate_data_dir", { repo: root })) {
-      reportError(`Renamed ${root}/.dspane to ${DATA_DIR}`);
-    }
+    // The folder was first called .dspane, then .diffpane: rename it if that is what this repo has.
+    const old = await invoke<string | null>("migrate_data_dir", { repo: root });
+    if (old) reportError(`Renamed ${root}/${old} to ${DATA_DIR}`);
   } catch (e) {
     reportError(String(e));
   }
@@ -166,7 +167,7 @@ export function repoData(root: string): RepoData {
   return cache.get(key(root))?.data ?? empty();
 }
 
-/** Whether `.diffpane/state.json` exists for this repository. */
+/** Whether `.hunkpad/state.json` exists for this repository. */
 export const hasRepoData = (root: string) => cache.get(key(root))?.exists ?? false;
 
 /** Changes a repository's data and saves it shortly after. */
@@ -201,7 +202,7 @@ async function flush(root: string) {
       await invoke("write_file", {
         repo: root,
         path: IGNORE_FILE,
-        content: "# Diffpane data: local to this machine, never committed.\n*\n",
+        content: "# Hunkpad data: local to this machine, never committed.\n*\n",
       });
     }
     await invoke("write_file", { repo: root, path: STATE_FILE, content: `${JSON.stringify(entry.data, null, 2)}\n` });
@@ -209,16 +210,16 @@ async function flush(root: string) {
     const created = !entry.exists;
     entry.exists = true;
     if (created) onCreated(entry.root);
-    // Older copies in localStorage are only removed once the data is safely on disk.
-    for (const k of entry.migrated) localStorage.removeItem(k);
+    // Older copies in the app settings are only removed once the data is safely on disk.
+    for (const k of entry.migrated) settings.removeItem(k);
     if (entry.migrated.length) {
       const colors = (readLocal("repoColors") ?? {}) as Record<string, string>;
       delete colors[key(root)];
-      localStorage.setItem("repoColors", JSON.stringify(colors));
+      settings.setItem("repoColors", JSON.stringify(colors));
       entry.migrated = [];
     }
   } catch (e) {
-    reportError(`Could not save Diffpane data in ${root}/${DATA_DIR}: ${e}`);
+    reportError(`Could not save Hunkpad data in ${root}/${DATA_DIR}: ${e}`);
   }
 }
 

@@ -1,12 +1,14 @@
-//! Native side of Diffpane. Deliberately thin: it runs `git`, reads and writes
+//! Native side of Hunkpad. Deliberately thin: it runs `git`, reads and writes
 //! work-tree files, and watches the repository. All Git logic lives in the
 //! TypeScript frontend (src/git.ts).
+
+mod platform;
 
 use std::{
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -16,7 +18,7 @@ use notify_debouncer_mini::{
     DebounceEventResult, Debouncer,
 };
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Default)]
 struct WatchState(Mutex<Option<Debouncer<RecommendedWatcher>>>);
@@ -34,6 +36,11 @@ const GIT_NOT_FOUND: &str = "GIT_NOT_FOUND";
 /// The git executable in use; found once, re-checked by `git_version`.
 static GIT_EXE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
+/// Locks a mutex even if a panic elsewhere poisoned it: the data is still usable.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn hidden(cmd: &mut Command) -> &mut Command {
     #[cfg(windows)]
     {
@@ -44,8 +51,9 @@ fn hidden(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-/// `git` from PATH, else Git for Windows' usual install folders. The fallback
-/// matters right after installing Git: a running app still has the old PATH.
+/// `git` from PATH, else the usual install folders. The fallback matters right
+/// after installing Git (a running app still has the old PATH), and on macOS
+/// for Homebrew's Git when the login shell's PATH could not be read.
 fn find_git() -> Option<PathBuf> {
     let works = |exe: &Path| {
         hidden(Command::new(exe).arg("--version"))
@@ -72,12 +80,19 @@ fn find_git() -> Option<PathBuf> {
             return Some(found);
         }
     }
+    #[cfg(not(windows))]
+    {
+        let candidates = ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"];
+        if let Some(found) = candidates.into_iter().map(Path::new).find(|c| c.is_file() && works(c)) {
+            return Some(found.to_path_buf());
+        }
+    }
     None
 }
 
 /// The executable to run (detected on first use).
 fn git_exe() -> PathBuf {
-    let mut cached = GIT_EXE.lock().unwrap();
+    let mut cached = lock(&GIT_EXE);
     if cached.is_none() {
         *cached = find_git();
     }
@@ -89,18 +104,15 @@ fn git_exe() -> PathBuf {
 #[tauri::command]
 fn git_version() -> Option<String> {
     let found = find_git();
-    *GIT_EXE.lock().unwrap() = found.clone();
+    *lock(&GIT_EXE) = found.clone();
     let out = hidden(Command::new(found?).arg("--version")).output().ok()?;
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Opens Git for Windows' download page in the default browser (only that page).
+/// Opens Git's download page for this platform in the default browser (only that page).
 #[tauri::command]
 fn open_git_download() -> Result<(), String> {
-    hidden(Command::new("explorer.exe").arg("https://git-scm.com/download/win"))
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    platform::open_url(platform::GIT_DOWNLOAD_URL)
 }
 
 fn git_command(cwd: &str) -> Command {
@@ -115,12 +127,7 @@ fn git_command(cwd: &str) -> Command {
         .env("GIT_EDITOR", "true")
         // Paths are file names, never globs.
         .env("GIT_LITERAL_PATHSPECS", "1");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    hidden(&mut cmd);
     cmd
 }
 
@@ -228,7 +235,7 @@ async fn run_git(
     .map_err(|e| e.to_string())?
 }
 
-const TEMP_INDEX_PREFIX: &str = "diffpane-index-";
+const TEMP_INDEX_PREFIX: &str = "hunkpad-index-";
 
 /// A temporary index must be one of ours: in the OS temp folder, with our prefix.
 fn check_temp_index(path: &str) -> Result<PathBuf, String> {
@@ -241,7 +248,7 @@ fn check_temp_index(path: &str) -> Result<PathBuf, String> {
     if ours {
         Ok(p)
     } else {
-        Err(format!("not a Diffpane temporary index: {path}"))
+        Err(format!("not a Hunkpad temporary index: {path}"))
     }
 }
 
@@ -267,8 +274,13 @@ fn remove_temp_index(path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Joins a repo-relative path, rejecting anything that could escape the repo.
+/// Joins a repo-relative path, rejecting anything that could escape the repo
+/// and any `repo` that is not a Git work tree, so files are only read and
+/// written inside repositories.
 fn safe_join(repo: &str, path: &str) -> Result<PathBuf, String> {
+    if !Path::new(repo).join(".git").exists() {
+        return Err(format!("not a Git repository: {repo}"));
+    }
     let rel = Path::new(path);
     if rel.components().any(|c| !matches!(c, Component::Normal(_))) {
         return Err(format!("invalid path: {path}"));
@@ -293,7 +305,7 @@ async fn read_file(repo: String, path: String) -> Result<Option<String>, String>
 async fn write_file(repo: String, path: String, content: String) -> Result<(), String> {
     let full = safe_join(&repo, &path)?;
     tauri::async_runtime::spawn_blocking(move || {
-        // e.g. the first save into .diffpane/ creates the folder.
+        // e.g. the first save into .hunkpad/ creates the folder.
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
@@ -303,17 +315,26 @@ async fn write_file(repo: String, path: String, content: String) -> Result<(), S
     .map_err(|e| e.to_string())?
 }
 
-/// Renames a repository's data folder from its first name, `.dspane`, to
-/// `.diffpane`. Only when `.diffpane` does not exist yet, so nothing is overwritten.
+/// The data folder's earlier names (the app was called Diffpane), newest first.
+const OLD_DATA_DIRS: [&str; 2] = [".diffpane", ".dspane"];
+
+/// Renames a repository's data folder from an earlier name to `.hunkpad` and
+/// returns the old name. Only when `.hunkpad` does not exist yet, so nothing is
+/// overwritten.
 #[tauri::command]
-fn migrate_data_dir(repo: String) -> Result<bool, String> {
-    let old = Path::new(&repo).join(".dspane");
-    let new = Path::new(&repo).join(".diffpane");
-    if !old.is_dir() || new.exists() {
-        return Ok(false);
+fn migrate_data_dir(repo: String) -> Result<Option<String>, String> {
+    let new = Path::new(&repo).join(".hunkpad");
+    if new.exists() {
+        return Ok(None);
     }
+    let Some(name) = OLD_DATA_DIRS.into_iter().find(|n| Path::new(&repo).join(n).is_dir()) else {
+        return Ok(None);
+    };
+    let old = Path::new(&repo).join(name);
     std::fs::rename(&old, &new).map_err(|e| format!("could not rename {}: {e}", old.display()))?;
-    Ok(true)
+    // Its .gitignore still names the old app; it only needs to keep ignoring everything.
+    let _ = std::fs::write(new.join(".gitignore"), "# Hunkpad data: local to this machine, never committed.\n*\n");
+    Ok(Some(name.to_string()))
 }
 
 /// Repository path passed on the command line, e.g. by an IDE external tool.
@@ -323,14 +344,14 @@ fn initial_repo() -> Option<String> {
 }
 
 /// Inside `.git`, only files that change what we display are worth a refresh.
-/// `.diffpane` (Diffpane's own data, ignored by Git) never is: saving it must
+/// `.hunkpad` (Hunkpad's own data, ignored by Git) never is: saving it must
 /// not trigger a refresh that saves it again.
 fn is_relevant(path: &Path) -> bool {
     let parts: Vec<String> = path
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
-    if parts.iter().any(|p| p == ".diffpane" || p == ".dspane") {
+    if parts.iter().any(|p| p == ".hunkpad" || OLD_DATA_DIRS.contains(&p.as_str())) {
         return false;
     }
     match parts.iter().position(|p| p == ".git") {
@@ -342,6 +363,21 @@ fn is_relevant(path: &Path) -> bool {
                 Some("index" | "HEAD" | "refs" | "packed-refs" | "MERGE_HEAD" | "rebase-merge" | "rebase-apply")
             )
         }
+    }
+}
+
+/// Linux watches each folder separately (inotify), and big repositories (e.g.
+/// with node_modules) can hit the system's limit: say how to raise it.
+fn watch_error(e: &str) -> String {
+    let limit = cfg!(target_os = "linux")
+        && (e.contains("No space left") || e.contains("Too many open files") || e.contains("inotify"));
+    if limit {
+        format!(
+            "cannot watch this repository for changes ({e}): it has more folders than the system allows. \
+             Raise the limit, e.g. `sudo sysctl fs.inotify.max_user_watches=524288`; until then press F5 to refresh"
+        )
+    } else {
+        format!("cannot watch this repository for changes: {e}")
     }
 }
 
@@ -359,9 +395,9 @@ fn watch_repo(app: AppHandle, state: State<'_, WatchState>, repo: String) -> Res
     debouncer
         .watcher()
         .watch(Path::new(&repo), RecursiveMode::Recursive)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| watch_error(&e.to_string()))?;
     // Replacing the previous debouncer drops it, which stops the old watch.
-    *state.0.lock().unwrap() = Some(debouncer);
+    *lock(&state.0) = Some(debouncer);
     Ok(())
 }
 
@@ -401,7 +437,7 @@ fn find_child_repos(path: String) -> Vec<String> {
     repos
 }
 
-/// Writes `content` to `<temp>/diffpane-exports/<name>` and puts that file on
+/// Writes `content` to `<temp>/hunkpad-exports/<name>` and puts that file on
 /// the clipboard, so pasting into a chat attaches it as a file. Exports older
 /// than 7 days are deleted first. Returns the file's path.
 #[tauri::command]
@@ -415,7 +451,7 @@ fn copy_as_file(name: String, content: String) -> Result<String, String> {
     if safe.is_empty() {
         return Err("empty file name".into());
     }
-    let dir = std::env::temp_dir().join("diffpane-exports");
+    let dir = std::env::temp_dir().join("hunkpad-exports");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
 
     let week = Duration::from_secs(7 * 24 * 3600);
@@ -435,33 +471,8 @@ fn copy_as_file(name: String, content: String) -> Result<String, String> {
 
     let path = dir.join(safe);
     std::fs::write(&path, content).map_err(|e| format!("{}: {e}", path.display()))?;
-    let path_str = path.to_string_lossy().into_owned();
-
-    #[cfg(windows)]
-    {
-        use clipboard_win::{options::DoClear, raw, Clipboard};
-        // Open the clipboard (retrying if another app holds it), empty it, and put
-        // just this file on it: otherwise older copied text would stay alongside
-        // and a chat could paste that instead of the file.
-        // Other apps (clipboard history, Teams…) briefly lock the clipboard right
-        // after it changes: retry with short pauses, ~1 s in total.
-        let mut opened = Clipboard::new();
-        for _ in 0..40 {
-            if opened.is_ok() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-            opened = Clipboard::new();
-        }
-        let _clip = opened.map_err(|e| format!("could not open the clipboard (another app is using it): {e}"))?;
-        raw::set_file_list_with(&[path_str.as_str()], DoClear)
-            .map_err(|e| format!("could not put the file on the clipboard: {e}"))?;
-    }
-    #[cfg(not(windows))]
-    return Err("copying as a file is only supported on Windows for now".into());
-
-    #[allow(unreachable_code)]
-    Ok(path_str)
+    platform::copy_file_to_clipboard(&path)?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 /// For each path (relative to `base`, or absolute): whether it exists, as a file
@@ -479,6 +490,7 @@ fn is_file(path: String) -> bool {
 
 /// Git for Windows' own bash (not WSL's `bash.exe` from System32), derived
 /// from `git --exec-path` = `<git root>/mingw64/libexec/git-core`.
+#[cfg(windows)]
 fn git_bash() -> Option<PathBuf> {
     let out = git_command(".").arg("--exec-path").output().ok()?;
     let exec = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
@@ -486,8 +498,8 @@ fn git_bash() -> Option<PathBuf> {
     bash.is_file().then_some(bash)
 }
 
-/// Starts a user script in a new console window, in `cwd` (the repository).
-/// The window stays open afterwards so its output can be read.
+/// Starts a user script in a new console (Windows) or terminal window, in `cwd`
+/// (the repository). The window stays open afterwards so its output can be read.
 #[tauri::command]
 fn launch_script(cwd: String, script: String) -> Result<(), String> {
     let path = Path::new(&script);
@@ -532,25 +544,55 @@ fn launch_script(cwd: String, script: String) -> Result<(), String> {
         Ok(())
     }
     #[cfg(not(windows))]
-    {
-        let _ = ext;
-        Command::new(&script)
-            .current_dir(&cwd)
-            .spawn()
-            .map_err(|e| format!("could not start {script}: {e}"))?;
-        Ok(())
-    }
+    platform::launch_in_terminal(&cwd, path, &ext)
 }
 
 /// Stops watching (when the last tab is closed).
 #[tauri::command]
 fn unwatch_repo(state: State<'_, WatchState>) {
-    *state.0.lock().unwrap() = None;
+    *lock(&state.0) = None;
+}
+
+/// App-wide settings file (see settings.ts), in the OS app-config folder.
+fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    Ok(dir.join("settings.json"))
+}
+
+/// The settings file's content, or `None` before the first save.
+#[tauri::command]
+fn load_settings(app: AppHandle) -> Result<Option<String>, String> {
+    let path = settings_path(&app)?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Saves the settings: written next to the file, then renamed over it, so a
+/// crash or full disk never leaves half a file.
+#[tauri::command]
+fn save_settings(app: AppHandle, content: String) -> Result<(), String> {
+    serde_json::from_str::<serde_json::Value>(&content).map_err(|e| format!("invalid settings: {e}"))?;
+    let path = settings_path(&app)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, content).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[cfg(not(windows))]
+    platform::use_login_shell_path();
+
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(platform::mac_menu);
+    builder
         .plugin(tauri_plugin_dialog::init())
         .manage(WatchState::default())
         .invoke_handler(tauri::generate_handler![
@@ -570,8 +612,10 @@ pub fn run() {
             paths_exist,
             copy_as_file,
             git_version,
-            open_git_download
+            open_git_download,
+            load_settings,
+            save_settings
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Diffpane");
+        .expect("error while running Hunkpad");
 }

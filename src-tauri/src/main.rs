@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    diffpane_lib::run()
+    hunkpad_lib::run()
 }

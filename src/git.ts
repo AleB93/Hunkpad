@@ -15,10 +15,10 @@ export class GitError extends Error {
   }
 }
 
-/** git.exe could not be started: Git for Windows is not installed (or not found). */
+/** git could not be started: Git is not installed (or not found). */
 export class GitNotFoundError extends Error {
   constructor() {
-    super("Git was not found. Install Git for Windows (git-scm.com).");
+    super("Git was not found. Install Git (git-scm.com).");
   }
 }
 
@@ -233,7 +233,7 @@ function splitN(s: string, sep: string, n: number): string[] {
 
 const letter = (c: string) => (c === "." ? null : c);
 
-function parseStatus(out: string): RepoStatus {
+export function parseStatus(out: string): RepoStatus {
   const status: RepoStatus = {
     branch: null,
     oid: null,
@@ -284,7 +284,7 @@ function parseStatus(out: string): RepoStatus {
   return status;
 }
 
-function parseNameStatus(out: string): ChangedFile[] {
+export function parseNameStatus(out: string): ChangedFile[] {
   const tokens = out.split("\0");
   const files: ChangedFile[] = [];
   for (let i = 0; i < tokens.length && tokens[i]; ) {

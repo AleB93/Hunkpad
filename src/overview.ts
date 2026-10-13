@@ -24,7 +24,11 @@ export interface PatchFile {
   removed: number;
 }
 
-const unquote = (p: string) => (p.startsWith('"') && p.endsWith('"') ? p.slice(1, -1) : p);
+/** A path from a diff header. Git ends "--- a/x" / "+++ b/x" with a tab when the name has a space. */
+const unquote = (raw: string) => {
+  const p = raw.replace(/\t$/, "");
+  return p.startsWith('"') && p.endsWith('"') ? p.slice(1, -1) : p;
+};
 
 /** Parses unified diff output (any number of files) into files and hunks. */
 export function parsePatch(out: string): PatchFile[] {

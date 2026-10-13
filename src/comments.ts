@@ -1,5 +1,5 @@
 // Review comments on lines of the current files. Local only: stored with the
-// repository's other Diffpane data in .diffpane/state.json (repoStore.ts).
+// repository's other Hunkpad data in .hunkpad/state.json (repoStore.ts).
 //
 // A comment remembers its line number *and* that line's text, so it follows the
 // line when code above it moves. If the text is gone, it is "outdated" (kept,

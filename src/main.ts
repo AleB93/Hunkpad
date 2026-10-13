@@ -79,6 +79,8 @@ import {
   touchProject,
   updateProject,
 } from "./projects";
+import { isLinux, isMac, isWindows, keys, localizeShortcuts, primaryKey, samePath } from "./platform";
+import { setSettingsErrorHandler, settings } from "./settings";
 
 // The diff view is read-only, so the generic editor worker is enough;
 // syntax highlighting runs on the main thread.
@@ -210,7 +212,7 @@ function promptInput(label: string, value = ""): Promise<string | null> {
   );
 }
 
-const confirmAction = (message: string) => ask(message, { title: "Diffpane", kind: "warning" });
+const confirmAction = (message: string) => ask(message, { title: "Hunkpad", kind: "warning" });
 
 // ---- status bar & output log ---------------------------------------------
 
@@ -273,24 +275,12 @@ async function act(label: string, fn: () => Promise<unknown>) {
 // Every command that changes something goes through runGit's approver: the user
 // sees the exact command line and what it does, and can cancel the action.
 
-function loadConfirmGit(): boolean {
-  try {
-    return localStorage.getItem("confirmGit") !== "off";
-  } catch {
-    return true;
-  }
-}
-
-let confirmGit = loadConfirmGit();
+let confirmGit = settings.getItem("confirmGit") !== "off";
 
 function setConfirmGit(on: boolean) {
   confirmGit = on;
-  try {
-    localStorage.setItem("confirmGit", on ? "on" : "off");
-  } catch {
-    // just won't be remembered
-  }
-  setStatus(on ? "Diffpane will ask before each Git command" : "Git commands now run without asking");
+  settings.setItem("confirmGit", on ? "on" : "off");
+  setStatus(on ? "Hunkpad will ask before each Git command" : "Git commands now run without asking");
 }
 
 /** Shell-style display of a command line: arguments with spaces are quoted. */
@@ -852,7 +842,7 @@ function commentsChanged() {
 }
 
 modifiedEditor.addAction({
-  id: "diffpane.addComment",
+  id: "hunkpad.addComment",
   label: "Add comment on this line",
   contextMenuGroupId: "navigation",
   contextMenuOrder: 0,
@@ -908,7 +898,7 @@ function closeCommentDialog(save: boolean) {
 $("comment-save").addEventListener("click", () => closeCommentDialog(true));
 $("comment-cancel").addEventListener("click", () => closeCommentDialog(false));
 commentText.addEventListener("keydown", (e) => {
-  if (e.ctrlKey && e.key === "Enter") {
+  if (primaryKey(e) && e.key === "Enter") {
     e.preventDefault();
     closeCommentDialog(true);
   }
@@ -1003,7 +993,7 @@ async function renderCommentsPanel() {
         { class: "empty" },
         all.length
           ? "No comments match this filter."
-          : "No comments yet. In a diff, hover a line and click ＋ in the margin, right-click → Add comment, or press Ctrl+Alt+M.",
+          : `No comments yet. In a diff, hover a line and click ＋ in the margin, right-click → Add comment, or press ${keys("Ctrl+Alt+M")}.`,
       ),
     );
   }
@@ -1143,7 +1133,7 @@ async function copyExport(
     // A .md file on the clipboard: pasting into a chat attaches it instead of a wall of text.
     const name = exportFileName(scope);
     await invoke<string>("copy_as_file", { name, content: md });
-    setStatus(`Copied as file ${name} (${summary}): paste with Ctrl+V to attach it`);
+    setStatus(`Copied as file ${name} (${summary}): paste with ${keys("Ctrl+V")} to attach it`);
   } else {
     await navigator.clipboard.writeText(md);
     setStatus(`Copied for LLM as text: ${summary}`);
@@ -1168,24 +1158,18 @@ function exportFileName(scope: string): string {
   return `${repoName}-${slug(scope.replace(/\(.*?\)/g, ""))}-${when}.md`;
 }
 
-function loadCopyAsFile(): boolean {
-  try {
-    return localStorage.getItem("copyMode") !== "text";
-  } catch {
-    return true;
-  }
-}
+/**
+ * Files can be put on the clipboard on Windows and macOS. On Linux it depends
+ * on the desktop (X11/Wayland, file manager), so it always copies text there.
+ */
+const canCopyAsFile = !isLinux;
 
 /** "Copy for LLM" puts a .md file on the clipboard (default) or the plain text. */
-let copyAsFile = loadCopyAsFile();
+let copyAsFile = canCopyAsFile && settings.getItem("copyMode") !== "text";
 
 function setCopyAsFile(on: boolean) {
   copyAsFile = on;
-  try {
-    localStorage.setItem("copyMode", on ? "file" : "text");
-  } catch {
-    // just won't be remembered
-  }
+  settings.setItem("copyMode", on ? "file" : "text");
   setStatus(on ? "Copy for LLM now copies a .md file (pastes as an attachment)" : "Copy for LLM now copies plain text");
 }
 
@@ -1557,8 +1541,6 @@ let activeTab: Tab = "changes";
 // Each open repository is a tab. Tabs, names and colours are stored only in
 // the app's own storage (see projects.ts); nothing is written inside repos.
 
-const samePath = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
-
 let openTabs: string[] = [];
 
 /** What a tab remembers while another one is active. */
@@ -1824,7 +1806,7 @@ async function openRepo(path: string) {
 
 async function openRepoNow(path: string) {
   const r = await Repo.open(path);
-  await loadRepoData(r.root); // its .diffpane data, before anything renders
+  await loadRepoData(r.root); // its .hunkpad data, before anything renders
   saveTabState();
   // A repository belongs to one Git user: if another user has it, switch to that user.
   const owner = gitUsers.find(
@@ -1855,7 +1837,7 @@ async function openRepoNow(path: string) {
   target = saved?.target ?? null; // re-shown by refresh() if still valid
 
   touchProject(r.root, r.name);
-  document.title = `Diffpane — ${projectName(r.root)}`;
+  document.title = `Hunkpad — ${projectName(r.root)}`;
   document.body.classList.add("has-repo");
   renderTabs();
   persistTabs();
@@ -1878,7 +1860,7 @@ function showNoRepo() {
   $("commit-as").replaceChildren();
   $("branch-btn").classList.add("hidden");
   $("sync-btn").classList.add("hidden");
-  document.title = "Diffpane";
+  document.title = "Hunkpad";
   document.body.classList.remove("has-repo");
   invoke("unwatch_repo").catch(showError);
   renderTabs();
@@ -1947,7 +1929,7 @@ function tabMenu(root: string): MenuItem[] {
         if (!name) return;
         updateProject(root, { name });
         renderTabs();
-        if (repo && samePath(repo.root, root)) document.title = `Diffpane — ${name}`;
+        if (repo && samePath(repo.root, root)) document.title = `Hunkpad — ${name}`;
       },
     },
     { label: "Copy path", run: () => navigator.clipboard.writeText(root) },
@@ -2000,7 +1982,7 @@ function renderTabs() {
         },
         h("span", { class: "dot" }),
         h("span", { class: "name" }, projectName(root)),
-        iconBtn("✕", "Close tab (Ctrl+W)", () => closeTab(root)),
+        iconBtn("✕", keys("Close tab (Ctrl+W)"), () => closeTab(root)),
       );
       if (color) tab.style.setProperty("--tab-color", color);
       return withContextMenu(tab, () => tabMenu(root));
@@ -2212,7 +2194,7 @@ function renderChanges() {
   const hasData = hasRepoData(r.root);
   list.append(keptHead(keptPaths.length + (hasData ? 1 : 0)));
   if (!collapsedNodes.has("root|kept")) {
-    // Diffpane's own folder: always kept local (it ignores itself for Git).
+    // Hunkpad's own folder: always kept local (it ignores itself for Git).
     if (hasData) list.append(dataFolderRow());
     list.append(...arrange(keptFiles, (f) => keptRow(f), "kept"));
     // Still kept, but no changes right now: listed so they can be removed.
@@ -2232,19 +2214,19 @@ function renderChanges() {
 const isKept = (path: string) =>
   !!repo && (path.startsWith(`${DATA_DIR}/`) || loadKeptLocal(repo.root).includes(path));
 
-/** The permanent row for .diffpane/: Diffpane's data folder, never committed. */
+/** The permanent row for .hunkpad/: Hunkpad's data folder, never committed. */
 function dataFolderRow() {
   return h(
     "div",
     {
       class: "item kept idle",
       title:
-        `${DATA_DIR}/ holds this repository's Diffpane data (colour, groups, Kept local, scripts).\n` +
+        `${DATA_DIR}/ holds this repository's Hunkpad data (colour, groups, Kept local, scripts).\n` +
         `Its own ${DATA_DIR}/.gitignore ("*") makes Git ignore the whole folder: always kept local, never committed.`,
     },
     h("span", { class: "status" }, "🔒"),
     h("span", { class: "name" }, `${DATA_DIR}/`),
-    h("span", { class: "dir" }, "Diffpane data · ignored by Git"),
+    h("span", { class: "dir" }, "Hunkpad data · ignored by Git"),
   );
 }
 
@@ -2263,7 +2245,7 @@ function stopKeepingLocal(path: string) {
 }
 
 const KEPT_TITLE =
-  "Kept local: changes that stay on this machine and are never staged or committed by Diffpane " +
+  "Kept local: changes that stay on this machine and are never staged or committed by Hunkpad " +
   "(e.g. local settings). Unlike .gitignore, nothing is written to the repository; " +
   "a file stays here until you remove it.";
 
@@ -2417,7 +2399,7 @@ async function commit() {
   if (!hasStaged && !amend) {
     const unstaged = s.files.filter((f) => f.unstaged && !f.conflict && !isKept(f.path));
     if (!unstaged.length) return setStatus("Nothing to commit", true);
-    if (!(await ask("There are no staged changes. Stage all changes (except Kept local) and commit them?", { title: "Diffpane" }))) return;
+    if (!(await ask("There are no staged changes. Stage all changes (except Kept local) and commit them?", { title: "Hunkpad" }))) return;
     return act("Commit", async () => {
       await r.stage(pathsOf(unstaged));
       await r.commit(message, false);
@@ -2432,7 +2414,7 @@ async function commit() {
 
 $("commit-btn").addEventListener("click", () => commit());
 commitMsg.addEventListener("keydown", (e) => {
-  if (e.ctrlKey && e.key === "Enter") {
+  if (primaryKey(e) && e.key === "Enter") {
     e.preventDefault();
     commit();
   }
@@ -2747,7 +2729,7 @@ function blockFileRow(r: Repo, f: FileChange, group: string | null) {
   return draggableBlocks(row, f.path, group);
 }
 
-const DRAG_TYPE = "application/x-diffpane-blocks";
+const DRAG_TYPE = "application/x-hunkpad-blocks";
 
 /** Dragging a row carries that row's blocks (one file, one group). */
 function draggableBlocks<T extends HTMLElement>(el: T, path: string, group: string | null): T {
@@ -2787,7 +2769,7 @@ type ViewMode = "list" | "folder" | "time";
 
 function loadViewMode(): ViewMode {
   try {
-    const v = localStorage.getItem("viewMode");
+    const v = settings.getItem("viewMode");
     return v === "folder" || v === "time" ? v : "list";
   } catch {
     return "list";
@@ -2809,7 +2791,7 @@ async function loadFileTimes(r: Repo, s: RepoStatus) {
 async function setViewMode(mode: ViewMode) {
   viewMode = mode;
   try {
-    localStorage.setItem("viewMode", mode);
+    settings.setItem("viewMode", mode);
   } catch {
     // just won't be remembered
   }
@@ -3461,6 +3443,13 @@ async function scriptDialogFor(existing?: UserScript): Promise<UserScript | null
   return { id: existing?.id ?? newUserId(), name: scriptName.value.trim(), path: scriptPath.value.trim() };
 }
 
+scriptPath.placeholder = isWindows ? "C:\\path\\to\\script.ps1" : "/path/to/script.sh";
+$("script-help").textContent = isWindows
+  ? "Runs in a new console window, in this repository's folder. .ps1 with PowerShell, .cmd/.bat with cmd, " +
+    ".sh with Git Bash, .py with python, .js with node; other files with their Windows default program."
+  : `Runs in a new ${isMac ? "Terminal" : "terminal"} window, in this repository's folder. .sh with bash, ` +
+    ".zsh with zsh, .py with python3, .js with node, .ps1 with pwsh; other files must be executable (chmod +x).";
+
 $("script-cancel").addEventListener("click", () => scriptDialog.close("cancel"));
 for (const input of [scriptName, scriptPath]) input.addEventListener("input", () => (scriptError.textContent = ""));
 
@@ -3469,7 +3458,12 @@ $("script-browse").addEventListener("click", async () => {
     title: "Choose the script",
     defaultPath: repo?.root,
     filters: [
-      { name: "Scripts", extensions: ["ps1", "cmd", "bat", "sh", "py", "js", "mjs", "exe"] },
+      {
+        name: "Scripts",
+        extensions: isWindows
+          ? ["ps1", "cmd", "bat", "sh", "py", "js", "mjs", "exe"]
+          : ["sh", "bash", "zsh", "command", "py", "js", "mjs", "ps1"],
+      },
       { name: "All files", extensions: ["*"] },
     ],
   });
@@ -3586,7 +3580,7 @@ function openProject(p: Project) {
   openRepo(p.path).catch((e) => {
     if (e instanceof NotARepoError) return handleOpenError(e);
     showError(e);
-    setStatus(`Cannot open ${p.path}: ${errorText(e)}. Remove it from the list with ✕ (Ctrl+R).`, true);
+    setStatus(`Cannot open ${p.path}: ${errorText(e)}. Remove it from the list with ✕ (${keys("Ctrl+R")}).`, true);
   });
 }
 
@@ -3779,7 +3773,7 @@ function remoteMenu(rm: Remote): MenuItem[] {
 
 function moreMenu(): MenuItem[] {
   const items: MenuItem[] = [
-    { label: "Projects…  (Ctrl+R)", run: showProjects },
+    { label: keys("Projects…  (Ctrl+R)"), run: showProjects },
     { label: "Open repository…", run: pickRepo },
     { label: "Clone repository…", run: clone },
   ];
@@ -3810,10 +3804,14 @@ function moreMenu(): MenuItem[] {
       label: `${confirmGit ? "✓ " : ""}Ask before Git commands`,
       run: () => setConfirmGit(!confirmGit),
     },
-    {
-      label: copyAsFile ? "Copy for LLM as: ✓ file  ·  text" : "Copy for LLM as: file  ·  ✓ text",
-      run: () => setCopyAsFile(!copyAsFile),
-    },
+    ...(canCopyAsFile
+      ? [
+          {
+            label: copyAsFile ? "Copy for LLM as: ✓ file  ·  text" : "Copy for LLM as: file  ·  ✓ text",
+            run: () => setCopyAsFile(!copyAsFile),
+          },
+        ]
+      : []),
     { label: "Toggle output log", run: toggleOutput },
   ];
 }
@@ -3858,14 +3856,14 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "F5") {
     e.preventDefault();
     refresh().catch(showError);
-  } else if (e.ctrlKey && e.key.toLowerCase() === "o") {
+  } else if (primaryKey(e) && e.key.toLowerCase() === "o") {
     e.preventDefault();
     pickRepo();
-  } else if (e.ctrlKey && e.key.toLowerCase() === "r") {
+  } else if (primaryKey(e) && e.key.toLowerCase() === "r") {
     // Also stops the WebView's own Ctrl+R page reload.
     e.preventDefault();
     showProjects();
-  } else if (e.ctrlKey && e.key.toLowerCase() === "w") {
+  } else if (primaryKey(e) && e.key.toLowerCase() === "w") {
     e.preventDefault();
     if (repo) closeTab(repo.root);
   } else if (e.ctrlKey && e.key === "Tab") {
@@ -3887,15 +3885,16 @@ listen("repo-changed", () => {
   refreshTimer = window.setTimeout(() => refresh().catch(showError), 100);
 });
 
-// ---- per-repository data (.diffpane/, repoStore.ts) ------------------------------
+// ---- per-repository data (.hunkpad/, repoStore.ts) ------------------------------
 
 setRepoStoreErrorHandler((message) => setStatus(message, true));
-// The .diffpane/ row appears in Kept local as soon as the folder exists.
+setSettingsErrorHandler((message) => setStatus(message, true));
+// The .hunkpad/ row appears in Kept local as soon as the folder exists.
 setRepoStoreCreatedHandler((root) => {
   if (repo && samePath(repo.root, root) && status) renderChanges();
 });
 
-/** Loads every open tab's .diffpane data (for colours), then redraws the tabs. */
+/** Loads every open tab's .hunkpad data (for colours), then redraws the tabs. */
 function loadTabsData() {
   Promise.all(openTabs.map((p) => loadRepoData(p).catch(() => null)))
     .then(() => renderTabs())
@@ -3909,9 +3908,37 @@ window.addEventListener("beforeunload", () => void flushAll());
 
 const gitMissingDialog = $<HTMLDialogElement>("git-missing-dialog");
 
-/** Explains that Git for Windows is needed, with a download link and "Check again". */
+/** How to install Git on this platform, then "Check again". */
+function gitInstallSteps(): HTMLElement[] {
+  const code = (s: string) => h("code", {}, s);
+  const install = isWindows
+    ? h("li", {}, "Download and install Git for Windows (the default options are fine).")
+    : isMac
+      ? h(
+          "li",
+          {},
+          "Install Apple's Command Line Tools: run ",
+          code("xcode-select --install"),
+          " in Terminal. With Homebrew, ",
+          code("brew install git"),
+          " works too.",
+        )
+      : h(
+          "li",
+          {},
+          "Install it with your package manager, e.g. ",
+          code("sudo apt install git"),
+          " or ",
+          code("sudo dnf install git"),
+          ".",
+        );
+  return [install, h("li", {}, "Come back here and click ", h("b", {}, "Check again"), ". No restart needed.")];
+}
+$("git-missing-steps").replaceChildren(...gitInstallSteps());
+
+/** Explains that Git is needed, how to install it, and offers "Check again". */
 function showGitMissing() {
-  setStatus("Git was not found: install Git for Windows (git-scm.com)", true);
+  setStatus("Git was not found: install Git (git-scm.com)", true);
   $("git-missing-state").textContent = "";
   if (!gitMissingDialog.open) gitMissingDialog.showModal();
 }
@@ -3960,4 +3987,5 @@ async function startup() {
   }
 }
 
+localizeShortcuts(document.body);
 startup().catch(showError);

@@ -1,9 +1,11 @@
-// App-wide data (Git users, tabs, saved projects) lives in the WebView's
-// localStorage. Per-repository data (colour, favourites, change groups, Kept
-// local, scripts) lives inside each repository, in .diffpane/ (see repoStore.ts);
+// App-wide data (Git users, tabs, saved projects) lives in the app settings
+// (settings.ts). Per-repository data (colour, favourites, change groups, Kept
+// local, scripts) lives inside each repository, in .hunkpad/ (see repoStore.ts);
 // the functions for it below keep their names but read and write that store.
 import type { HunkAssignment } from "./hunks";
+import { samePath } from "./platform";
 import { repoData, updateRepoData } from "./repoStore";
+import { settings } from "./settings";
 
 export interface Project {
   path: string;
@@ -15,12 +17,9 @@ export interface Project {
 const KEY = "projects";
 const MAX_RECENT = 20;
 
-// Windows paths are case-insensitive.
-const samePath = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
-
 function load(): Project[] {
   try {
-    const list: unknown = JSON.parse(localStorage.getItem(KEY) ?? "[]");
+    const list: unknown = JSON.parse(settings.getItem(KEY) ?? "[]");
     return Array.isArray(list) ? list.filter((p): p is Project => typeof p?.path === "string") : [];
   } catch {
     return [];
@@ -29,7 +28,7 @@ function load(): Project[] {
 
 function save(list: Project[]) {
   try {
-    localStorage.setItem(KEY, JSON.stringify(list));
+    settings.setItem(KEY, JSON.stringify(list));
   } catch {
     // storage unavailable: the list just won't persist
   }
@@ -70,7 +69,7 @@ export function removeProject(path: string) {
   save(load().filter((p) => !samePath(p.path, path)));
 }
 
-// ---- favourite branches & tags (per repository: .diffpane/state.json) ---------
+// ---- favourite branches & tags (per repository: .hunkpad/state.json) ---------
 
 /** Favourite refs of a repository, as `<kind>:<name>` keys. */
 export function favouriteRefs(repo: string): Set<string> {
@@ -123,7 +122,7 @@ const userTabsKey = (id: string) => `userTabs:${id}`;
 
 function read<T>(key: string, fallback: T): T {
   try {
-    const raw = localStorage.getItem(key);
+    const raw = settings.getItem(key);
     return raw === null ? fallback : (JSON.parse(raw) as T);
   } catch {
     return fallback;
@@ -132,8 +131,8 @@ function read<T>(key: string, fallback: T): T {
 
 function write(key: string, value: unknown) {
   try {
-    if (value === undefined) localStorage.removeItem(key);
-    else localStorage.setItem(key, JSON.stringify(value));
+    if (value === undefined) settings.removeItem(key);
+    else settings.setItem(key, JSON.stringify(value));
   } catch {
     // storage unavailable: just won't persist
   }
@@ -179,7 +178,7 @@ export function deleteUserTabs(id: string) {
   write(userTabsKey(id), undefined);
 }
 
-/** A repository's tab colour (from its .diffpane data; null until loaded or unset). */
+/** A repository's tab colour (from its .hunkpad data; null until loaded or unset). */
 export function repoColor(path: string): string | null {
   return repoData(path).color;
 }

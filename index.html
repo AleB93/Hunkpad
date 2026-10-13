@@ -3,15 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Diffpane</title>
+    <title>Hunkpad</title>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
     <!-- Row 1: Git users. Row 2: the active user's repositories. -->
     <div id="userbar">
       <!-- Animated version of app-icon.svg: lines "type" in, cursor blinks, a CRT scanline sweeps. -->
-      <svg id="logo" viewBox="0 0 16 16" shape-rendering="crispEdges" role="img" aria-label="Diffpane">
-        <title>Diffpane</title>
+      <svg id="logo" viewBox="0 0 16 16" shape-rendering="crispEdges" role="img" aria-label="Hunkpad">
+        <title>Hunkpad</title>
         <path fill="#1a1c2c" d="M1 0h14v1h1v14h-1v1H1v-1H0V1h1z" />
         <rect x="2" y="2" width="1" height="1" fill="#ff004d" />
         <rect x="3" y="2" width="1" height="1" fill="#ffa300" />
@@ -178,18 +178,16 @@
       <form method="dialog">
         <strong>Git was not found</strong>
         <p class="small">
-          Diffpane uses <b>Git for Windows</b> to read and change your repositories, and it is not installed on this PC
-          (or Diffpane cannot find it).
+          Hunkpad uses <b>Git</b> to read and change your repositories, and it is not installed on this computer (or
+          Hunkpad cannot find it).
         </p>
-        <ol class="small">
-          <li>Download and install Git for Windows (the default options are fine).</li>
-          <li>Come back here and click <b>Check again</b>. No restart needed.</li>
-        </ol>
+        <!-- Filled in for this platform (main.ts). -->
+        <ol id="git-missing-steps" class="small"></ol>
         <div id="git-missing-state" class="small muted"></div>
         <div class="row end">
           <button id="git-missing-close" type="button">Close</button>
           <button id="git-missing-check" type="button">Check again</button>
-          <button id="git-missing-download" type="button" class="primary">Download Git for Windows</button>
+          <button id="git-missing-download" type="button" class="primary">Download Git</button>
         </div>
       </form>
     </dialog>
@@ -214,7 +212,7 @@
         <strong id="comment-dialog-title">Add comment</strong>
         <pre id="comment-line"></pre>
         <textarea id="comment-text" rows="5" placeholder="Your comment (Ctrl+Enter to save)"></textarea>
-        <p class="small muted">Stored only on this machine, in this repository's .diffpane folder; never committed.</p>
+        <p class="small muted">Stored only on this machine, in this repository's .hunkpad folder; never committed.</p>
         <div class="row end">
           <button id="comment-cancel" type="button">Cancel</button>
           <button id="comment-save" type="button" class="primary">Save</button>
@@ -251,14 +249,12 @@
         <label class="field">
           Where it is
           <span class="row">
-            <input id="script-path" class="spacer" placeholder="C:\path\to\script.ps1" autocomplete="off" spellcheck="false" />
+            <input id="script-path" class="spacer" autocomplete="off" spellcheck="false" />
             <button id="script-browse" type="button">Browse…</button>
           </span>
         </label>
-        <p class="small muted">
-          Runs in a new console window, in this repository's folder. .ps1 with PowerShell, .cmd/.bat with cmd,
-          .sh with Git Bash, .py with python, .js with node; other files with their Windows default program.
-        </p>
+        <!-- Filled in for this platform (main.ts). -->
+        <p id="script-help" class="small muted"></p>
         <div id="script-error" class="small err"></div>
         <div class="row end">
           <button id="script-cancel" type="button">Cancel</button>
@@ -274,7 +270,7 @@
         <label class="field">Commit author name <input id="user-name" autocomplete="off" spellcheck="false" /></label>
         <label class="field">Commit author email <input id="user-email" type="email" autocomplete="off" spellcheck="false" /></label>
         <p class="small muted">
-          Used for commits in this user's repositories. Diffpane passes it on each git command, so nothing is written
+          Used for commits in this user's repositories. Hunkpad passes it on each git command, so nothing is written
           inside the repositories. Leave name and email empty to use your global Git identity.
         </p>
         <div id="user-error" class="small err"></div>
@@ -296,6 +292,6 @@
       </div>
     </dialog>
 
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/boot.ts"></script>
   </body>
 </html>

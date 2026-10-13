@@ -1,147 +1,149 @@
-# Diffpane
+# Hunkpad
 
-A lightweight Git client for Windows (also macOS/Linux): VS Code-quality diffs
-and Source Control features, without running VS Code.
+A lightweight, free and open-source Git client for **Windows, macOS and Linux**:
+VS Code-quality diffs and Source Control features, without running VS Code.
 
-Built with [Tauri 2](https://tauri.app/) (Rust, system WebView2) and the
-[Monaco](https://microsoft.github.io/monaco-editor/) diff editor — the same diff
-component VS Code uses.
+Built with [Tauri 2](https://tauri.app/) (Rust and the system's own WebView) and
+the [Monaco](https://microsoft.github.io/monaco-editor/) diff editor, the same
+diff component VS Code uses. It runs the `git` command line you already have,
+so it behaves exactly like Git in a terminal: your config, hooks and credential
+manager included.
 
 ## Features
 
-- **Changes** — staged / unstaged / conflicted files, live refresh via a file
+- **Changes**: staged / unstaged / conflicted files, live refresh via a file
   watcher; stage, unstage, discard per file or all.
-- **Line-level staging** — put the cursor in a change (or select lines) and
+- **Line-level staging**: put the cursor in a change (or select lines) and
   *Stage selection*, *Revert selection* or *Unstage selection*.
-- **Commit** — commit, amend, "stage all and commit" when nothing is staged.
-- **Merge / rebase / cherry-pick / revert in progress** — banner with
+- **Commit**: commit, amend, "stage all and commit" when nothing is staged.
+- **Merge / rebase / cherry-pick / revert in progress**: banner with
   Continue / Skip / Abort; conflicts with Accept current / incoming / Mark resolved.
-- **History** — paged log; per commit: changed files with diffs, checkout,
+- **History**: paged log; per commit: changed files with diffs, checkout,
   branch/tag here, cherry-pick, revert, reset (soft/mixed/hard).
-- **Branches & tags** — filter (multi-word, Enter checks out a single match),
-  favourites (★, per repo, shown first), checkout (incl. remote tracking), create, rename,
-  delete, merge, rebase, delete remote branch, push tag.
-- **Stashes** — stash (optionally with untracked), apply, pop, drop, view files.
-- **Remotes** — list, add, change URL, rename, remove (Branches tab → Remotes,
+- **Branches & tags**: filter (multi-word, Enter checks out a single match),
+  favourites (★, per repo, shown first), checkout (incl. remote tracking), create,
+  rename, delete, merge, rebase, delete remote branch, push tag.
+- **Stashes**: stash (optionally with untracked), apply, pop, drop, view files.
+- **Remotes**: list, add, change URL, rename, remove (Branches tab → Remotes,
   ⋯ → Add remote…; Publish offers to add one when there is none). Fetch, pull
-  (merge or rebase), push / publish, force push with
-  lease, sync (↓ behind ↑ ahead).
-- **View: List / Folders / Time** — arranges files inside every section: a
-  folder tree (single-child folder chains compacted, collapsible) or buckets by
-  last save on disk (last 5 min, 30 min, hour, today, yesterday, 7 days, older)
-  with each file's age.
-- **Copy for LLM** — plain Markdown (no prompt text): repo/branch/scope header,
-  one fenced diff per file with its status, then that file's comments (line,
-  open/resolved/outdated, code, text). From the diff toolbar (current diff, or
-  everything in the overview), the ⧉ on Staged/Unstaged/Kept local, group and
-  file menus, a commit's menu (message + diff) and the Comments tab. Kept local
-  files are left out of broad copies (often local secrets).
-  By default it copies a **.md file** (Windows clipboard file, like Explorer's copy),
-  so pasting into a chat attaches it instead of a wall of text; files live in
-  `%TEMP%diffpane-exports` and are deleted after 7 days. ⋯ → "Copy for LLM as:
-  file · text" switches to plain text.
-- **Review comments** — comment any line on the right side of a diff (hover →
-  ＋ in the margin, right-click → Add comment, or Ctrl+Alt+M). Shown under the
-  line; a **Comments** tab lists them by file (Open / Resolved / Outdated / All),
-  click to jump there. Comments follow their line as code moves and become
-  "outdated" when the line is gone. Stored in `.diffpane/`, never committed.
-- **Asks before every Git command** that changes something: shows the action,
-  the exact command line, what it does (destructive ones in red), the folder and
-  any input (e.g. the commit message). Cancel stops the whole action; "Don't ask
-  again for the rest of this action" for multi-step actions. Toggle: ⋯ → Ask
-  before Git commands.
-- **Scripts row** — under the repo tabs, per repository: add an existing script
-  (name + where it is) and run it with one click in a new console window, in the
-  repo folder (.ps1 PowerShell, .cmd/.bat cmd, .sh Git Bash, .py, .js, else the
-  Windows default program). Stored only in the app.
-- **Kept local** — files whose changes stay on this machine and are never staged
-  or committed (e.g. local settings), without touching `.gitignore`. Excluded from
-  Stage all, Discard all, groups and "stage all and commit"; stay listed until
-  removed. Stored only in the app.
-- **All changes overview** — with no file selected, the diff area lists every
+  (merge or rebase), push / publish, force push with lease, sync (↓ behind ↑ ahead).
+- **All changes overview**: with no file selected, the diff area lists every
   changed file (Staged, then Unstaged, new files included) showing only its
   changed chunks with 3 lines of context. Click a file or line to open its diff;
   **☰ All changes** or Esc goes back.
-- **Change groups (block level, like IntelliJ partial changelists)** — local-only
+- **View: List / Folders / Time**: arranges files inside every section: a
+  folder tree (single-child folder chains compacted, collapsible) or buckets by
+  last save on disk (last 5 min, 30 min, hour, today, yesterday, 7 days, older).
+- **Change groups** (block level, like IntelliJ partial changelists): local-only
   "waves" of work. Each unstaged change *block* belongs to a group, so one file
   can be split across groups (badge `2/3`). New blocks go to the **active** group
-  (● marker; ⊞ makes a new group active). Blocks keep their group while you keep
-  editing them. Move a block from its diff (**Move change ▾**), a file's blocks by
-  drag & drop or the row menu. **Commit group** commits only its blocks, built in
-  a temporary index in the OS temp folder: other staged work stays staged, hooks
-  run. Stored on this machine only; never committed or pushed.
-- **Git users** — a first row of tabs (Work, Personal…), each with its own commit
+  (● marker; ⊞ makes a new group active). Move a block from its diff
+  (**Move change ▾**), or a file's blocks by drag & drop or the row menu.
+  **Commit group** commits only its blocks, built in a temporary index in the OS
+  temp folder: other staged work stays staged, hooks run.
+- **Review comments**: comment any line on the right side of a diff (hover →
+  ＋ in the margin, right-click → Add comment, or Ctrl+Alt+M). A **Comments** tab
+  lists them by file (Open / Resolved / Outdated / All). Comments follow their
+  line as code moves and become "outdated" when the line is gone.
+- **Copy for LLM**: plain Markdown (no prompt text): repo/branch/scope header,
+  one fenced diff per file with its status, then that file's comments. From the
+  diff toolbar, the ⧉ on Staged/Unstaged/Kept local, group and file menus, a
+  commit's menu (message + diff) and the Comments tab. Kept local files are left
+  out of broad copies (they often hold local secrets). On Windows and macOS it
+  copies a **.md file** (like copying a file in Explorer or Finder), so pasting
+  into a chat attaches it instead of a wall of text; ⋯ → "Copy for LLM as:
+  file · text" switches to plain text. On Linux it always copies text.
+- **Asks before every Git command** that changes something: shows the action,
+  the exact command line, what it does (destructive ones in red), the folder and
+  any input (e.g. the commit message). Cancel stops the whole action. Toggle:
+  ⋯ → Ask before Git commands.
+- **Kept local**: files whose changes stay on this machine and are never staged
+  or committed (e.g. local settings), without touching `.gitignore`.
+- **Scripts row**: per repository, add an existing script and run it with one
+  click in a new terminal window, in the repository folder (see
+  [Scripts](#scripts)).
+- **Git users**: a first row of tabs (Work, Personal…), each with its own commit
   author name/email and its own repository tabs. The identity is passed as
-  `git -c user.name=… -c user.email=…`, so repo config is never written. Move a
-  repo between users from its tab menu; a repo belongs to one user.
-- **Repository tabs** — one tab per open repo (+ at the end opens a saved
-  project), colour per tab (right-click) framing the whole window below the
-  tabs (border, tinted toolbar and status bar), Ctrl+Tab / Ctrl+W, tabs restored on
-  start. Names, colours and tabs live only in the app, never inside a repo.
-- **Projects** — every opened repo is remembered; pin, rename, remove; quick
-  picker with search on **Ctrl+R** or by clicking the project name. Starts on
-  the last project.
+  `git -c user.name=… -c user.email=…`, so repo config is never written.
+- **Repository tabs**: one tab per open repo, a colour per tab framing the whole
+  window, tabs restored on start.
+- **Projects**: every opened repo is remembered; pin, rename, remove; quick
+  picker with search.
 - **Clone**, output log of every Git command, light/dark theme from the OS.
 
-## Where data is stored
+## Install
 
-- **Per repository**: `<repo>/.diffpane/state.json` — tab colour, favourite
-  branches/tags, change groups and block assignments, Kept local list, scripts, comments.
-  `.diffpane/.gitignore` contains `*`, so Git ignores the whole folder (itself
-  included): it is always kept local and never committed, without touching the
-  repository's own `.gitignore`. Created on the first save; data from older
-  versions moves there automatically.
-- **App-wide** (WebView storage in `%LOCALAPPDATA%dev.diffpane.desktop`): Git
-  users, open tabs, saved projects, view mode, "Ask before Git commands".
+Hunkpad needs **Git** installed:
 
-## Design
+- **Windows**: [Git for Windows](https://git-scm.com/download/win).
+- **macOS**: run `xcode-select --install` in Terminal, or `brew install git`.
+- **Linux**: your package manager, e.g. `sudo apt install git`.
 
-The Rust side (`src-tauri/src/lib.rs`) is deliberately thin: it runs `git`,
-reads/writes work-tree files and watches the repo. All Git logic is TypeScript
-in `src/git.ts`, using the `git` CLI (same approach as VS Code), so it behaves
-exactly like Git on the command line, hooks and credential manager included.
+Ready-made installers are not published yet. Until then, build it from source:
+see [CONTRIBUTING.md](CONTRIBUTING.md#build). Then:
 
-## Prerequisites (Windows)
+- **Windows**: run the installer from `src-tauri/target/release/bundle/`.
+  Windows SmartScreen may warn that the app is from an unknown publisher (it is
+  not code-signed): click **More info → Run anyway**.
+- **macOS**: open the `.dmg` from `src-tauri/target/release/bundle/dmg/` and drag
+  Hunkpad to Applications. A build you made yourself opens normally. A copy
+  downloaded from elsewhere is not notarized by Apple: if macOS refuses to open
+  it, go to **System Settings → Privacy & Security** and click **Open Anyway**.
+- **Linux**: install the `.deb` or `.rpm`, or run the `.AppImage`, from
+  `src-tauri/target/release/bundle/`.
 
-1. Git for Windows on `PATH`.
-2. Node.js 20+.
-3. Rust: `winget install Rustlang.Rustup`, then open a new terminal.
-4. MSVC build tools: Visual Studio Installer → *Desktop development with C++*
-   (MSVC + Windows SDK).
+## Keyboard shortcuts
 
-## Run
+On macOS, use ⌘ wherever Ctrl is listed (Ctrl+Tab stays Ctrl).
 
-```bash
-npm install
-npm run tauri dev
-```
+| Shortcut         | Action                                  |
+| ---------------- | --------------------------------------- |
+| Ctrl+R           | Projects (quick picker with search)     |
+| Ctrl+O           | Open a repository                       |
+| Ctrl+W           | Close the current repository tab        |
+| Ctrl+Tab         | Next tab (Shift for the previous one)   |
+| Ctrl+Enter       | Commit (in the message) / save comment  |
+| Ctrl+Alt+M       | Comment on the current line             |
+| F5               | Refresh                                 |
+| Esc              | Close a menu, or back to All changes    |
 
-Open a specific repo: `npm run tauri dev -- -- C:\path\to\repo`.
+## Scripts
 
-## Build
+Scripts run in a new terminal window, in the repository's folder, which stays
+open afterwards so the output can be read.
 
-Standalone `.exe` only (no installers):
-
-```bash
-powershell -ExecutionPolicy Bypass -File scripts/build.ps1
-```
-
-or `bash scripts/build.sh` (Git Bash; also for macOS/Linux later). Output:
-`src-tauri/target/release/diffpane.exe`.
-
-With installers (MSI + NSIS):
-
-```bash
-npm run tauri build
-```
-
-Output: `src-tauri/target/release/bundle/` (MSI and NSIS installers).
+- **Windows**: `.ps1` with PowerShell, `.cmd`/`.bat` with cmd, `.sh` with Git
+  Bash, `.py` with python, `.js` with node; other files with their default program.
+- **macOS and Linux**: `.sh` with bash, `.zsh` with zsh, `.py` with python3,
+  `.js` with node, `.ps1` with pwsh; other files must be executable (`chmod +x`).
+  macOS uses Terminal (or whichever app opens `.command` files). Linux uses
+  `$TERMINAL` if set, otherwise the first terminal found (GNOME Terminal,
+  Konsole, xfce4-terminal, Alacritty, kitty, xterm…).
 
 ## Use from your IDE
 
-Register `diffpane.exe "<repo path>"` as an external tool (Visual Studio:
-Tools → External Tools, arguments `$(SolutionDir)`). With no argument it
-reopens the last repository.
+Pass a repository path to open it: `hunkpad "<repo path>"`. With no argument it
+reopens the last repository. For example, in Visual Studio: Tools → External
+Tools, command `hunkpad.exe`, arguments `$(SolutionDir)`. On macOS:
+`open -a Hunkpad --args "<repo path>"`.
+
+## Privacy and where data is stored
+
+Hunkpad has no telemetry, no accounts and no update checks. The only network
+traffic is what Git itself does (fetch, pull, push, clone) and opening the Git
+download page if you click it.
+
+- **Per repository**: `<repo>/.hunkpad/state.json` holds the tab colour,
+  favourite branches/tags, change groups, Kept local list, scripts and review
+  comments. `.hunkpad/.gitignore` contains `*`, so Git ignores the whole folder:
+  it is never committed, and the repository's own `.gitignore` is not touched.
+- **App-wide**: `settings.json` holds Git users, open tabs, saved projects and
+  preferences. It lives in:
+  - Windows: `%APPDATA%\io.github.aleb93.hunkpad\`
+  - macOS: `~/Library/Application Support/io.github.aleb93.hunkpad/`
+  - Linux: `~/.config/io.github.aleb93.hunkpad/`
+- **Temporary files**: Copy for LLM files go to the OS temp folder
+  (`hunkpad-exports`) and are deleted after 7 days.
 
 ## Known limitations
 
@@ -149,3 +151,13 @@ reopens the last repository.
 - A change that only adds/removes the final newline cannot be staged by line;
   stage the whole file instead.
 - No blame, no graph view, no submodule management yet.
+- On Linux, very large repositories can exceed the system's file-watch limit;
+  Hunkpad then says how to raise it, and F5 refreshes in the meantime.
+
+## Contributing
+
+Bug reports and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+[MIT](LICENSE)
