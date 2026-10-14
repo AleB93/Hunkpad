@@ -35,6 +35,11 @@
       <div id="repo-tabs"></div>
       <button id="add-tab" title="Open a saved project in a new tab (Ctrl+R)">+</button>
     </div>
+    <!-- Built-in one-click actions on the active repository. -->
+    <div id="quickbar" class="repo-only">
+      <span class="small muted">Quick</span>
+      <button id="qa-terminal" title="Open a terminal in the repository folder">&gt;_ Terminal here</button>
+    </div>
     <!-- The active repository's own scripts: each runs in a new console, in the repo folder. -->
     <div id="scriptbar" class="repo-only">
       <span class="small muted">Scripts</span>
@@ -141,6 +146,7 @@
       <main>
         <div id="diff-bar">
           <button id="overview-btn" class="hidden" title="Back to the overview of all changes (Esc)">☰ All changes</button>
+          <button id="compare-pill" class="hidden"></button>
           <button id="copy-btn" class="repo-only" title="Copy this diff, file status and comments as Markdown (to paste into an LLM)">⧉ Copy for LLM</button>
           <span id="diff-title" class="muted"></span>
           <span class="spacer"></span>
@@ -188,6 +194,20 @@
           <button id="git-missing-close" type="button">Close</button>
           <button id="git-missing-check" type="button">Check again</button>
           <button id="git-missing-download" type="button" class="primary">Download Git</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="rebase-dialog">
+      <form method="dialog">
+        <strong id="rebase-title">Rebase</strong>
+        <div id="rebase-info" class="small"></div>
+        <label class="small" id="rebase-fetch-row"><input type="checkbox" id="rebase-fetch" /> <span id="rebase-fetch-label">Fetch first</span></label>
+        <label class="small"><input type="checkbox" id="rebase-autostash" /> Auto-stash uncommitted changes (put aside, then restored after the rebase)</label>
+        <div id="rebase-warning" class="small err"></div>
+        <div class="row end">
+          <button id="rebase-cancel" type="button">Cancel</button>
+          <button id="rebase-go" type="button" class="primary">Rebase</button>
         </div>
       </form>
     </dialog>

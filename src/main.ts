@@ -7,6 +7,7 @@ import {
   ChangedFile,
   Commit,
   CommitEntry,
+  IndexEntry,
   EMPTY_TREE,
   FileChange,
   CancelledError,
@@ -325,6 +326,9 @@ function explainGit(args: string[]): { text: string; danger: boolean } {
       if (has("--no-edit")) return say("Creates the merge commit with Git's prepared message.");
       return say("Creates a new commit from what is in the index.");
     case "update-index":
+      if (has("--index-info")) {
+        return say("Writes the new versions of the files listed below straight into the index, all in one go (staging change blocks, or committing a group). Mode 0 = remove from the index. Your files on disk are not touched.");
+      }
       return has("--force-remove")
         ? say("Removes a file from the index (part of staging specific change blocks / committing a group).")
         : say("Writes a file's new version straight into the index (staging specific lines or change blocks).");
@@ -347,7 +351,10 @@ function explainGit(args: string[]): { text: string; danger: boolean } {
       if (has("--abort")) return say("Aborts the rebase and goes back to the state before it.");
       if (has("--continue")) return say("Continues the rebase after the conflicts were resolved.");
       if (has("--skip")) return say("Skips the current commit of the rebase (its changes are dropped).", true);
-      return say("Replays the current branch's commits on top of that branch (rewrites their history).");
+      return say(
+        "Replays the current branch's commits on top of that branch (rewrites their history)." +
+          (has("--autostash") ? " --autostash: uncommitted changes are put aside first and restored afterwards (also on abort)." : ""),
+      );
     case "cherry-pick":
       return has("--abort") ? say("Aborts the cherry-pick.") : say("Applies that commit's changes on top of the current branch as a new commit.");
     case "revert":
@@ -365,7 +372,11 @@ function explainGit(args: string[]): { text: string; danger: boolean } {
       return has("-d") ? say("Deletes the tag locally.") : say("Creates a tag.");
     case "fetch":
       return say(
-        `Downloads new commits and branches from ${has("--all") ? "all remotes" : `the remote “${rest.filter((x) => !x.startsWith("-")).pop() ?? "default"}”`}; does not change your files. --prune removes remote branches that were deleted.`,
+        (() => {
+          const [remote, branch] = rest.filter((x) => !x.startsWith("-"));
+          const from = has("--all") ? "all remotes" : branch ? `branch “${branch}” from the remote “${remote}”` : `the remote “${remote ?? "default"}”`;
+          return `Downloads new commits from ${from}; does not change your files or your branches.${has("--prune") ? " --prune removes remote branches that were deleted." : ""}`;
+        })(),
       );
     case "pull":
       return say(has("--rebase") ? "Fetches and rebases your local commits on top of the remote branch." : "Fetches and merges the remote branch into the current branch.");
@@ -477,7 +488,16 @@ function askToRun(cmd: PendingCommand): Promise<boolean> {
     $("git-cmd").textContent = `git ${showArgs(cmd.args)}`;
     $("git-info").textContent = text;
     const extra: string[] = [];
-    if (cmd.stdin !== undefined) {
+    if (cmd.stdin !== undefined && cmd.args.includes("--index-info")) {
+      // "mode sha<TAB>path" lines: show the files, not the object ids.
+      const files = cmd.stdin
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => (l.startsWith("0 ") ? `${l.split("\t")[1]} (removed)` : l.split("\t")[1]));
+      const shown = files.slice(0, 15).map((p) => `• ${p}`);
+      if (files.length > 15) shown.push(`…and ${files.length - 15} more`);
+      extra.push(`${files.length} file(s):\n${shown.join("\n")}`);
+    } else if (cmd.stdin !== undefined) {
       const preview = cmd.stdin.length > 300 ? `${cmd.stdin.slice(0, 300)}…` : cmd.stdin;
       extra.push(`Input passed to the command (e.g. the commit message):\n${preview.trim()}`);
     }
@@ -602,7 +622,9 @@ type DiffTarget =
   | { kind: "index"; path: string; origPath: string | null }
   | { kind: "tree"; left: string; right: string; path: string; origPath: string | null; label: string }
   /** Index ↔ index plus only the given group's change blocks (null = Ungrouped). */
-  | { kind: "blocks"; path: string; group: string | null };
+  | { kind: "blocks"; path: string; group: string | null }
+  /** A branch/commit's version ↔ the file on disk ("Compare with"). `fromKey`: the row it was opened from. */
+  | { kind: "vsref"; path: string; ref: string; fromKey: string };
 
 interface Sides {
   original: string;
@@ -610,6 +632,8 @@ interface Sides {
   binary: boolean;
   /** Not valid UTF-8: shown, but never written back. */
   lossy: boolean;
+  /** Shown after the title, e.g. "not in origin/dev". */
+  note?: string;
   /** For a "blocks" view: each shown block and the lines it occupies on the right. */
   blocks?: { hunk: Hunk; range: [number, number] }[];
 }
@@ -654,6 +678,12 @@ async function loadSides(r: Repo, t: DiffTarget): Promise<Sides> {
         blocks: mine.map((hunk, i) => ({ hunk, range: composed.ranges[i] })),
       };
     }
+  } else if (t.kind === "vsref") {
+    // Work-tree form (line endings) so it compares cleanly with the file on disk.
+    const onBranch = await r.showAsWorktree(`${t.ref}:${t.path}`);
+    const onDisk = await r.readWorktree(t.path);
+    const note = onBranch === null ? `not in ${t.ref}` : onDisk === null ? "deleted here" : undefined;
+    return { ...finishSides(onBranch ?? "", onDisk ?? ""), note };
   } else {
     original = (await r.show(`${t.left}:${t.origPath ?? t.path}`)) ?? "";
     modified = (await r.show(`${t.right}:${t.path}`)) ?? "";
@@ -671,6 +701,7 @@ function finishSides(original: string, modified: string): Sides {
 }
 
 function diffLabel(t: DiffTarget): string {
+  if (t.kind === "vsref") return `${t.path}  (${t.ref} ↔ Working tree)`;
   if (t.kind === "blocks") {
     const group = t.group ? (currentGroups().find((g) => g.id === t.group)?.name ?? "group") : "Ungrouped";
     return `${t.path}  (Index ↔ “${group}” changes)`;
@@ -684,6 +715,10 @@ function diffLabel(t: DiffTarget): string {
 /** `wholeFile`: show every line (e.g. to see a comment on an unchanged line). */
 async function showDiff(t: DiffTarget, opts: { wholeFile?: boolean } = {}) {
   if (!repo) return;
+  // While "Compare with" is on, a changed file opens against that branch instead.
+  if (compareRef && ((t.kind === "worktree" && !t.conflict) || t.kind === "index" || t.kind === "blocks")) {
+    t = { kind: "vsref", path: t.path, ref: compareRef, fromKey: targetKey(t) };
+  }
   target = t;
   const s = await loadSides(repo, t);
   if (target !== t) return; // a newer selection won the race
@@ -694,7 +729,7 @@ async function showDiff(t: DiffTarget, opts: { wholeFile?: boolean } = {}) {
   monaco.editor.setModelLanguage(modifiedModel, lang);
   setValue(originalModel, s.binary ? "" : s.original);
   setValue(modifiedModel, s.binary ? "(binary file)" : s.modified);
-  $("diff-title").textContent = diffLabel(t);
+  $("diff-title").textContent = s.note ? `${diffLabel(t)}  ·  ${s.note}` : diffLabel(t);
   $("placeholder").classList.add("hidden");
   $("overview").classList.add("hidden");
   $("overview-btn").classList.remove("hidden");
@@ -1248,6 +1283,17 @@ function copyCurrentView() {
       });
     });
   }
+  if (t.kind === "vsref") {
+    return copying(async () => {
+      const r = repo!;
+      // Not on that branch and not tracked here: show it as a new file.
+      const notOnBranch = (await r.show(`${t.ref}:${t.path}`)) === null;
+      const raw = notOnBranch && file?.unstaged === "U" ? await r.untrackedPatch(t.path) : await r.refWorktreePatch(t.ref, t.path);
+      const patch = splitPatch(raw)[0]?.text ?? "";
+      const status = notOnBranch ? `new compared with ${t.ref}` : `compared with ${t.ref} (that branch ↔ working tree)`;
+      return copyExport(`File ${t.path} compared with ${t.ref}`, [{ path: t.path, status, patch, comments: [] }]);
+    });
+  }
   if (!file) return setStatus("This file has no changes to copy", true);
   if (t.kind === "index") return copyFile(file, "staged");
   if (t.kind === "blocks") {
@@ -1409,6 +1455,80 @@ async function renderOverview() {
 
 $("overview-btn").addEventListener("click", clearDiff);
 
+// ---- compare with a branch ---------------------------------------------------
+//
+// While a compare ref is set, every changed file opens as "<ref> ↔ your file on
+// disk". The pill in the toolbar shows it and turns it off.
+
+let compareRef: string | null = null;
+
+function loadRecentCompares(): string[] {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem("recentCompares") ?? "[]");
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberCompare(ref: string) {
+  const list = [ref, ...loadRecentCompares().filter((r) => r !== ref)].slice(0, 6);
+  try {
+    localStorage.setItem("recentCompares", JSON.stringify(list));
+  } catch {
+    // just won't be remembered
+  }
+}
+
+/** The plain diff target for a path (what clicking it would open without compare). */
+function baseTargetFor(path: string): DiffTarget {
+  const f = status?.files.find((x) => x.path === path);
+  if (f && !f.unstaged && f.staged) return { kind: "index", path, origPath: f.origPath };
+  return { kind: "worktree", path, conflict: !!f?.conflict };
+}
+
+async function setCompare(ref: string | null) {
+  const r = repo;
+  if (!r) return;
+  if (ref && !(await r.isCommit(ref))) {
+    setStatus(`“${ref}” is not a branch, tag or commit in this repository`, true);
+    return;
+  }
+  compareRef = ref;
+  if (ref) rememberCompare(ref);
+  setStatus(ref ? `Comparing files with ${ref}: click a changed file` : "Back to showing your changes");
+  renderComparePill();
+  const t = target;
+  if (t && t.kind !== "tree") await showDiff(t.kind === "vsref" ? baseTargetFor(t.path) : t);
+}
+
+function renderComparePill() {
+  const pill = $("compare-pill");
+  pill.classList.toggle("hidden", !compareRef);
+  pill.textContent = compareRef ? `⇄ vs ${compareRef}  ✕` : "";
+  pill.title = compareRef ? `Files open compared with ${compareRef}. Click to stop comparing.` : "";
+}
+
+$("compare-pill").addEventListener("click", () => setCompare(null).catch(showError));
+
+async function pickCompareRef() {
+  const ref = await promptInput("Compare with which branch, tag or commit? (e.g. origin/dev)", compareRef ?? "origin/");
+  if (ref) await setCompare(ref);
+}
+
+function compareMenu(): MenuItem[] {
+  const s = status;
+  const mark = (ref: string | null) => (compareRef === ref ? "✓ " : "");
+  const items: MenuItem[] = [{ label: `${mark(null)}My changes (no branch)`, run: () => setCompare(null).catch(showError) }];
+  if (s?.upstream) items.push({ label: `${mark(s.upstream)}Upstream: ${s.upstream}`, run: () => setCompare(s.upstream).catch(showError) });
+  const recent = loadRecentCompares().filter((r) => r !== s?.upstream);
+  if (recent.length) {
+    items.push("-", ...recent.map((ref): MenuItem => ({ label: `${mark(ref)}${ref}`, run: () => setCompare(ref).catch(showError) })));
+  }
+  items.push("-", { label: "Other branch, tag or commit…", run: () => pickCompareRef().catch(showError) });
+  return items;
+}
+
 const targetKey = (t: DiffTarget | null) =>
   !t
     ? ""
@@ -1416,7 +1536,9 @@ const targetKey = (t: DiffTarget | null) =>
       ? `tree:${t.left}:${t.right}:${t.path}`
       : t.kind === "blocks"
         ? `blocks:${t.group}:${t.path}`
-        : `${t.kind}:${t.path}`;
+        : t.kind === "vsref"
+          ? t.fromKey // keeps the row it was opened from highlighted
+          : `${t.kind}:${t.path}`;
 
 /** Change blocks under the cursor / selection in a "blocks" view. */
 function pickBlocks(): Hunk[] | null {
@@ -1493,10 +1615,22 @@ function unstageSelected() {
 function renderDiffActions() {
   const bar = $("diff-actions");
   bar.replaceChildren();
+  renderComparePill();
   const t = target;
   if (!t || !status) return;
   const file = status.files.find((f) => f.path === t.path);
   const btn = (label: string, title: string, run: () => void) => h("button", { title, onclick: run }, label);
+  // "Compare with" applies to a current file (not history diffs or conflicts).
+  if (t.kind === "vsref" || t.kind === "index" || t.kind === "blocks" || (t.kind === "worktree" && !t.conflict)) {
+    const compare = h("button", { title: "Compare this file with your changes, the upstream branch or another branch" }, "⇄ Compare ▾");
+    compare.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const rect = compare.getBoundingClientRect();
+      showMenu(rect.left, rect.bottom, compareMenu());
+    });
+    bar.append(compare);
+  }
+  if (t.kind === "vsref") return; // a comparison: nothing to stage or revert from here
   if (t.kind === "worktree" && t.conflict && file) {
     bar.append(
       btn("Accept current", "Keep our version of the whole file", () => acceptConflict(file, "ours")),
@@ -2050,6 +2184,8 @@ async function refreshOnce() {
   if (!t) return renderOverview();
   if (t.kind === "tree") return showDiff(t);
   if (t.kind === "blocks") return blocksOf(t.path, t.group).length ? showDiff(t) : clearDiff();
+  // A comparison stays open even with no local changes left: it can still differ from the branch.
+  if (t.kind === "vsref") return showDiff(t);
   const file = status.files.find((f) => f.path === t.path);
   const stillThere =
     file &&
@@ -2551,27 +2687,53 @@ async function readSidesForBlocks(r: Repo, path: string) {
   return { index, work };
 }
 
-/** Stages blocks of one file (raw; callers wrap it in act). */
-async function stageBlocksRaw(r: Repo, path: string, blocks: Hunk[]) {
-  const all = allBlocksOf(path);
-  if (!blocks.length) return;
-  if (blocks.length === all.length || blocks.some((b) => b.whole)) return r.stage([path]);
-  const { index, work } = await readSidesForBlocks(r, path);
-  await r.setIndexContent(path, applyLineChanges(index, work, blocks.map(toLineChange)));
+/** All of the file's blocks (or an unsplittable one): stage/discard it as a whole file. */
+const isWholeFile = (path: string, blocks: Hunk[]) =>
+  blocks.length === allBlocksOf(path).length || blocks.some((b) => b.whole);
+
+/**
+ * Stages blocks of many files with at most two Git commands, so a group is not
+ * one approval per file: whole files → one `git add`; partial files → their new
+ * versions are prepared quietly, then written with one `update-index --index-info`.
+ */
+async function stageBlocksBatch(r: Repo, files: [string, Hunk[]][]) {
+  const whole: string[] = [];
+  const partial: IndexEntry[] = [];
+  for (const [path, blocks] of files) {
+    if (!blocks.length) continue;
+    if (isWholeFile(path, blocks)) {
+      whole.push(path);
+      continue;
+    }
+    const { index, work } = await readSidesForBlocks(r, path);
+    partial.push(await r.blobFor(path, applyLineChanges(index, work, blocks.map(toLineChange))));
+  }
+  if (whole.length) await r.stage(whole);
+  if (partial.length) await r.setIndexEntries(partial);
 }
 
-/** Reverts blocks of one file in the work tree (raw; callers confirm and wrap in act). */
-async function discardBlocksRaw(r: Repo, path: string, blocks: Hunk[]) {
-  const all = allBlocksOf(path);
-  if (!blocks.length) return;
-  const file = status?.files.find((f) => f.path === path);
-  if (blocks.length === all.length || blocks.some((b) => b.whole)) {
-    return file?.unstaged === "U" ? r.discard([], [path]) : r.discard([path], []);
+/**
+ * Reverts blocks of many files: whole tracked files → one `git restore`, whole
+ * new files → one `git clean`; partial files are rewritten directly (no Git command).
+ */
+async function discardBlocksBatch(r: Repo, files: [string, Hunk[]][]) {
+  const tracked: string[] = [];
+  const untracked: string[] = [];
+  for (const [path, blocks] of files) {
+    if (!blocks.length) continue;
+    if (isWholeFile(path, blocks)) {
+      (status?.files.find((f) => f.path === path)?.unstaged === "U" ? untracked : tracked).push(path);
+      continue;
+    }
+    const keep = allBlocksOf(path).filter((b) => !blocks.includes(b));
+    const { index, work } = await readSidesForBlocks(r, path);
+    await r.writeWorktree(path, applyLineChanges(index, work, keep.map(toLineChange)));
   }
-  const keep = all.filter((b) => !blocks.includes(b));
-  const { index, work } = await readSidesForBlocks(r, path);
-  await r.writeWorktree(path, applyLineChanges(index, work, keep.map(toLineChange)));
+  await r.discard(tracked, untracked);
 }
+
+const stageBlocksRaw = (r: Repo, path: string, blocks: Hunk[]) => stageBlocksBatch(r, [[path, blocks]]);
+const discardBlocksRaw = (r: Repo, path: string, blocks: Hunk[]) => discardBlocksBatch(r, [[path, blocks]]);
 
 function stageBlocks(path: string, blocks: Hunk[]) {
   act("Stage changes", () => stageBlocksRaw(repo!, path, blocks));
@@ -2618,9 +2780,7 @@ async function commitGroup(g: ChangeGroup) {
 
 async function stageGroup(g: string | null) {
   const files = groupFiles(g);
-  await act("Stage group", async () => {
-    for (const [path, blocks] of files) await stageBlocksRaw(repo!, path, blocks);
-  });
+  await act("Stage group", () => stageBlocksBatch(repo!, files));
 }
 
 async function discardGroup(g: string | null, name: string) {
@@ -2628,9 +2788,7 @@ async function discardGroup(g: string | null, name: string) {
   const n = files.reduce((sum, [, b]) => sum + b.length, 0);
   if (!n) return;
   if (!(await confirmAction(`Discard ${n} change block(s) of “${name}” in ${files.length} file(s)? This cannot be undone.`))) return;
-  await act("Discard group", async () => {
-    for (const [path, blocks] of files) await discardBlocksRaw(repo!, path, blocks);
-  });
+  await act("Discard group", () => discardBlocksBatch(repo!, files));
 }
 
 function groupHeadMenu(g: ChangeGroup, isActive: boolean): MenuItem[] {
@@ -3120,8 +3278,9 @@ function refMenu(ref: Ref, refs: Ref[]): MenuItem[] {
   if (!ref.current) items.push({ label: "Checkout", run: () => checkoutRef(ref, refs) });
   if (!ref.current && ref.kind !== "tag") {
     items.push(
+      { label: "Compare my files with this", run: () => setCompare(ref.name).catch(showError) },
       { label: "Merge into current branch", run: () => act(`Merge ${ref.name}`, () => r.merge(ref.name)) },
-      { label: "Rebase current branch onto this", run: () => act(`Rebase onto ${ref.name}`, () => r.rebase(ref.name)) },
+      { label: "Rebase current branch onto this…", run: () => rebaseOnto(ref).catch(showError) },
     );
   }
   items.push({
@@ -3171,6 +3330,97 @@ function refMenu(ref: Ref, refs: Ref[]): MenuItem[] {
   }
   items.push("-", { label: "Copy name", run: () => navigator.clipboard.writeText(ref.name) });
   return items;
+}
+
+// ---- rebase onto a branch (with fetch / auto-stash options) -----------------
+
+function loadFlag(key: string, fallback: boolean): boolean {
+  try {
+    const v = localStorage.getItem(key);
+    return v === null ? fallback : v === "1";
+  } catch {
+    return fallback;
+  }
+}
+
+function saveFlag(key: string, on: boolean) {
+  try {
+    localStorage.setItem(key, on ? "1" : "0");
+  } catch {
+    // just won't be remembered
+  }
+}
+
+const rebaseDialog = $<HTMLDialogElement>("rebase-dialog");
+const rebaseFetch = $<HTMLInputElement>("rebase-fetch");
+const rebaseAutostash = $<HTMLInputElement>("rebase-autostash");
+let answerRebase: ((go: boolean) => void) | null = null;
+
+$("rebase-go").addEventListener("click", () => {
+  answerRebase?.(true);
+  rebaseDialog.close();
+});
+$("rebase-cancel").addEventListener("click", () => {
+  answerRebase?.(false);
+  rebaseDialog.close();
+});
+rebaseDialog.addEventListener("cancel", () => answerRebase?.(false));
+
+/**
+ * Rebases the current branch onto `ref`. For a remote branch, "Fetch first" makes
+ * it the same as `git pull --rebase <remote> <branch>`; "Auto-stash" uses Git's
+ * --autostash so uncommitted changes are put aside and restored.
+ */
+async function rebaseOnto(ref: Ref) {
+  const r = repo;
+  const s = status;
+  if (!r || !s) return;
+  if (!s.branch) return setStatus("Check out a branch first: a detached HEAD cannot be rebased this way", true);
+  const remote = ref.kind === "remote";
+  const dirty = s.files.filter((f) => f.staged || f.unstaged || f.conflict).length;
+  const preview = await r.rebasePreview(ref.name);
+
+  $("rebase-title").textContent = `Rebase ${s.branch} onto ${ref.name}`;
+  const lines = [
+    `Your branch's ${preview.replay} commit(s) not in ${ref.name} will be replayed on top of it.`,
+    dirty ? `${dirty} file(s) have uncommitted changes.` : "No uncommitted changes.",
+  ];
+  if (remote) lines.push(`With “Fetch first” this is the same as: git pull --rebase ${ref.name.replace("/", " ")}`);
+  $("rebase-info").textContent = lines.join("\n");
+  $("rebase-info").style.whiteSpace = "pre-wrap";
+  $("rebase-fetch-row").classList.toggle("hidden", !remote);
+  $("rebase-fetch-label").textContent = `Fetch ${ref.name} first (get its latest commits)`;
+  rebaseFetch.checked = loadFlag("rebaseFetch", true);
+  rebaseAutostash.checked = loadFlag("rebaseAutostash", true);
+  const warnings: string[] = [];
+  if (preview.pushed) {
+    warnings.push(
+      `⚠ ${preview.pushed} of these commits are already pushed: the rebase rewrites them, so the next push must be a force push (⋯ → Force push with lease).`,
+    );
+  }
+  const updateWarning = () => {
+    const stash = dirty && !rebaseAutostash.checked ? [`Git will refuse to start: ${dirty} file(s) have uncommitted changes. Tick Auto-stash, or commit/stash them first.`] : [];
+    $("rebase-warning").textContent = [...warnings, ...stash].join("\n");
+    $("rebase-warning").style.whiteSpace = "pre-wrap";
+  };
+  rebaseAutostash.onchange = updateWarning;
+  updateWarning();
+
+  rebaseDialog.showModal();
+  $("rebase-go").focus();
+  const go = await new Promise<boolean>((resolve) => (answerRebase = resolve));
+  answerRebase = null;
+  if (!go) return;
+
+  const fetchFirst = remote && rebaseFetch.checked;
+  const autostash = rebaseAutostash.checked;
+  if (remote) saveFlag("rebaseFetch", fetchFirst);
+  saveFlag("rebaseAutostash", autostash);
+  await act(`Rebase onto ${ref.name}`, async () => {
+    if (fetchFirst) await r.fetchRemoteBranch(ref.name);
+    await r.rebase(ref.name, { autostash });
+  });
+  if (activeTab === "branches") await loadBranches();
 }
 
 async function newBranch() {
@@ -3544,6 +3794,16 @@ $("script-save").addEventListener("click", async () => {
 scriptDialog.querySelector("form")!.addEventListener("submit", (e) => {
   e.preventDefault();
   $("script-save").click();
+});
+
+$("qa-terminal").addEventListener("click", async () => {
+  if (!repo) return;
+  try {
+    await invoke("open_terminal", { cwd: repo.root });
+    setStatus(`Opened a terminal in ${repo.root}`);
+  } catch (e) {
+    setStatus(`Could not open a terminal: ${errorText(e)}`, true);
+  }
 });
 
 $("add-script").addEventListener("click", async () => {

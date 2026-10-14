@@ -198,6 +198,13 @@ export interface Stash {
   message: string;
 }
 
+/** One index line: a file version (mode + object id), or sha null to remove the path. */
+export interface IndexEntry {
+  path: string;
+  sha: string | null;
+  mode?: string;
+}
+
 export interface CommitEntry {
   path: string;
   content?: string;
@@ -397,11 +404,37 @@ export class Repo {
 
   /** Replaces a file's staged content without touching the work tree (used for line-level staging). */
   async setIndexContent(path: string, content: string): Promise<void> {
-    const ls = await this.read(["ls-files", "-s", "--", path]);
-    const mode = ls.split(" ")[0] || "100644";
-    // --path applies the clean filters, so work-tree line endings are normalised.
-    const hash = await this.git(["hash-object", "-w", "--stdin", `--path=${path}`], { stdin: content, quiet: true });
-    await this.git(["update-index", "--add", "--cacheinfo", `${mode},${hash.stdout.trim()},${path}`]);
+    await this.setIndexEntries([await this.blobFor(path, content)]);
+  }
+
+  /**
+   * Stores a file version in Git's object database (nothing visible changes) and
+   * returns what the index needs. `content` undefined = take the work-tree file.
+   * --path applies the repo's filters (line endings), like `git add` would.
+   */
+  async blobFor(path: string, content?: string): Promise<IndexEntry> {
+    const mode = (await this.read(["ls-files", "-s", "--", path])).split(" ")[0] || "100644";
+    const hashed =
+      content === undefined
+        ? await this.git(["hash-object", "-w", "--", path], { quiet: true })
+        : await this.git(["hash-object", "-w", "--stdin", `--path=${path}`], { quiet: true, stdin: content });
+    return { path, mode, sha: hashed.stdout.trim() };
+  }
+
+  private zeroId: string | null = null;
+
+  /**
+   * Writes several index entries with ONE command (`update-index --index-info`),
+   * so staging a whole group is one approval, not one per file. sha null = remove.
+   */
+  async setIndexEntries(entries: IndexEntry[], opts: { indexFile?: string; quiet?: boolean } = {}) {
+    if (!entries.length) return;
+    if (!this.zeroId) {
+      const format = (await this.read(["rev-parse", "--show-object-format"], true)).trim();
+      this.zeroId = "0".repeat(format === "sha256" ? 64 : 40);
+    }
+    const lines = entries.map((e) => (e.sha ? `${e.mode ?? "100644"} ${e.sha}\t${e.path}` : `0 ${this.zeroId}\t${e.path}`));
+    await this.git(["update-index", "--index-info"], { stdin: `${lines.join("\n")}\n`, ...opts });
   }
 
   // ---- staging ----------------------------------------------------------
@@ -453,6 +486,17 @@ export class Repo {
     return this.read(["diff", "-U3", "--no-color", "--no-ext-diff", left, right, "--", path], true);
   }
 
+  /** Diff of one file between a branch/commit and the work tree ("compare with branch"). */
+  refWorktreePatch(ref: string, path: string): Promise<string> {
+    return this.read(["diff", "-U3", "--no-color", "--no-ext-diff", ref, "--", path], true);
+  }
+
+  /** Whether `ref` names a commit (branch, tag, SHA…). */
+  async isCommit(ref: string): Promise<boolean> {
+    const out = await this.git(["rev-parse", "-q", "--verify", `${ref}^{commit}`], { quiet: true, allowFail: true });
+    return out.code === 0;
+  }
+
   /** A commit: header (author, date, message) and its full patch. */
   async commitPatch(sha: string): Promise<{ header: string; patch: string }> {
     const header = await this.read(["log", "-1", "--format=commit %H%nAuthor: %an <%ae>%nDate:   %ad%n%n%B", sha], true);
@@ -476,25 +520,15 @@ export class Repo {
     const temp = { quiet: true, indexFile: tmp };
     try {
       await this.git(unborn ? ["read-tree", "--empty"] : ["read-tree", "HEAD"], temp);
-      const updates: string[][] = [];
+      const updates: IndexEntry[] = [];
       for (const e of entries) {
-        if (e.deleted) {
-          updates.push(["update-index", "--force-remove", "--", e.path]);
-          continue;
-        }
-        const mode = (await this.read(["ls-files", "-s", "--", e.path])).split(" ")[0] || "100644";
-        // --path applies the repo's filters (line endings) like `git add` would.
-        const hashed =
-          e.content === undefined
-            ? await this.git(["hash-object", "-w", "--", e.path], { quiet: true })
-            : await this.git(["hash-object", "-w", "--stdin", `--path=${e.path}`], { quiet: true, stdin: e.content });
-        updates.push(["update-index", "--add", "--cacheinfo", `${mode},${hashed.stdout.trim()},${e.path}`]);
+        updates.push(e.deleted ? { path: e.path, sha: null } : await this.blobFor(e.path, e.content));
       }
-      for (const u of updates) await this.git(u, temp);
+      await this.setIndexEntries(updates, temp);
       await this.git(["commit", "-F", "-"], { stdin: message, indexFile: tmp });
-      // The real index now agrees with the new commit for these files
+      // The real index now agrees with the new commit for these files: one command
       // (not quiet: it changes the repository's index, so it is shown and approved).
-      for (const u of updates) await this.git(u);
+      await this.setIndexEntries(updates);
     } finally {
       await invoke("remove_temp_index", { path: tmp }).catch(() => {});
     }
@@ -614,8 +648,25 @@ export class Repo {
     await this.git(["merge", "--no-edit", ref]);
   }
 
-  async rebase(ref: string) {
-    await this.git(["rebase", ref]);
+  /** `autostash`: Git puts uncommitted changes aside and restores them afterwards (also on abort). */
+  async rebase(ref: string, opts: { autostash?: boolean } = {}) {
+    await this.git(["rebase", ...(opts.autostash ? ["--autostash"] : []), ref]);
+  }
+
+  /** Updates one remote branch, e.g. `origin/dev` → `git fetch origin dev`. */
+  async fetchRemoteBranch(remoteRef: string) {
+    const slash = remoteRef.indexOf("/");
+    await this.git(["fetch", "--progress", remoteRef.slice(0, slash), remoteRef.slice(slash + 1)]);
+  }
+
+  /** How a rebase onto `onto` would go: commits replayed, and how many of them are already pushed. */
+  async rebasePreview(onto: string): Promise<{ replay: number; pushed: number }> {
+    const count = async (range: string) => Number((await this.read(["rev-list", "--count", range], true)).trim()) || 0;
+    const replay = await count(`${onto}..HEAD`);
+    const hasUpstream = (await this.git(["rev-parse", "-q", "--verify", "@{u}"], { quiet: true, allowFail: true })).code === 0;
+    // Replayed commits that the upstream already has = replayed − not yet pushed.
+    const pushed = hasUpstream ? Math.max(0, replay - (await count("@{u}..HEAD"))) : 0;
+    return { replay, pushed };
   }
 
   async createTag(name: string, message: string | null, ref?: string) {

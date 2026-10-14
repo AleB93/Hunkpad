@@ -566,7 +566,8 @@ dialog p { margin: 0; }
 .item.kept.idle { color: var(--muted); }
 .item.kept.idle .status { color: var(--muted); }
 
-/* ---- scripts row (under the repo tabs) ---- */
+/* ---- quick actions + scripts rows (under the repo tabs) ---- */
+#quickbar,
 #scriptbar {
   display: flex;
   align-items: center;
@@ -579,6 +580,10 @@ dialog p { margin: 0; }
 #script-buttons button { flex: none; padding: 1px 9px; }
 #script-buttons button .play { color: var(--add); margin-right: 4px; }
 #add-script { padding: 1px 8px; color: var(--muted); }
+#quickbar button { flex: none; padding: 1px 9px; }
+/* Same label width, so both rows' buttons line up. */
+#quickbar > .small, #scriptbar > .small { width: 42px; flex: none; }
+body:not(.has-repo) #quickbar,
 body:not(.has-repo) #scriptbar { display: none; }
 
 /* ---- Git command confirmation ---- */
@@ -682,3 +687,14 @@ body:not(.has-repo) #scriptbar { display: none; }
 .comment-row.resolved .text { text-decoration: line-through; color: var(--muted); }
 .comment-row.outdated .ln { color: var(--del); }
 #copy-btn { padding: 1px 8px; }
+
+/* ---- compare with a branch ---- */
+#compare-pill {
+  padding: 1px 10px;
+  border-radius: 12px;
+  border-color: var(--ren);
+  color: var(--ren);
+  background: color-mix(in srgb, var(--ren) 10%, transparent);
+  white-space: nowrap;
+}
+.menu { max-height: 70vh; overflow-y: auto; }

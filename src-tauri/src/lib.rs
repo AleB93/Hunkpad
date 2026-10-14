@@ -608,6 +608,34 @@ fn launch_npm_script(package_json: &Path, name: &str) -> Result<(), String> {
     platform::launch_in_terminal(&dir.to_string_lossy(), &format!("npm run {}", platform::quote(name)))
 }
 
+/// An interactive shell in a new window, in `cwd`: Windows Terminal when it is
+/// installed, else a PowerShell console; the default terminal elsewhere.
+#[tauri::command]
+fn open_terminal(cwd: String) -> Result<(), String> {
+    if !Path::new(&cwd).is_dir() {
+        return Err(format!("folder not found: {cwd}"));
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        // wt is an app execution alias: spawning fails when it is not installed.
+        if Command::new("wt.exe").args(["-d", &cwd]).spawn().is_ok() {
+            return Ok(());
+        }
+        Command::new("powershell.exe")
+            .args(["-NoExit", "-NoLogo"])
+            .current_dir(&cwd)
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .spawn()
+            .map_err(|e| format!("could not open a terminal: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    platform::launch_in_terminal(&cwd, "exec \"${SHELL:-/bin/bash}\" -l")
+}
+
 /// Stops watching (when the last tab is closed).
 #[tauri::command]
 fn unwatch_repo(state: State<'_, WatchState>) {
@@ -669,6 +697,7 @@ pub fn run() {
             remove_temp_index,
             is_file,
             launch_script,
+            open_terminal,
             read_package_json,
             migrate_data_dir,
             paths_exist,

@@ -20,9 +20,15 @@ manager included.
   Continue / Skip / Abort; conflicts with Accept current / incoming / Mark resolved.
 - **History**: paged log; per commit: changed files with diffs, checkout,
   branch/tag here, cherry-pick, revert, reset (soft/mixed/hard).
+- **Compare with a branch**: ⇄ Compare in the diff toolbar (or Branches →
+  right-click → Compare my files with this): every changed file then opens as
+  that branch's version ↔ your file on disk (upstream, recent refs, or any
+  branch/tag/commit). The "⇄ vs origin/dev ✕" pill shows it and turns it off.
 - **Branches & tags**: filter (multi-word, Enter checks out a single match),
   favourites (★, per repo, shown first), checkout (incl. remote tracking), create,
-  rename, delete, merge, rebase, delete remote branch, push tag.
+  rename, delete, merge, rebase onto (with "Fetch first" = pull --rebase, and
+  "Auto-stash" uncommitted changes; warns when pushed commits get rewritten),
+  delete remote branch, push tag.
 - **Stashes**: stash (optionally with untracked), apply, pop, drop, view files.
 - **Remotes**: list, add, change URL, rename, remove (Branches tab → Remotes,
   ⋯ → Add remote…; Publish offers to add one when there is none). Fetch, pull
