@@ -295,6 +295,15 @@ function setConfirmGit(on: boolean) {
   setStatus(on ? "Hunkpad will ask before each Git command" : "Git commands now run without asking");
 }
 
+// Pull with --autostash: uncommitted changes are put aside and restored afterwards.
+let pullAutostash = settings.getItem("pullAutostash") !== "off";
+
+function setPullAutostash(on: boolean) {
+  pullAutostash = on;
+  settings.setItem("pullAutostash", on ? "on" : "off");
+  setStatus(on ? "Pull will auto-stash uncommitted changes" : "Pull will no longer auto-stash");
+}
+
 /** Shell-style display of a command line: arguments with spaces are quoted. */
 const showArgs = (args: string[]) =>
   args.map((a) => (/[\s"'`$&|<>]/.test(a) || a === "" ? `"${a.replace(/"/g, '\\"')}"` : a)).join(" ");
@@ -379,7 +388,10 @@ function explainGit(args: string[]): { text: string; danger: boolean } {
         })(),
       );
     case "pull":
-      return say(has("--rebase") ? "Fetches and rebases your local commits on top of the remote branch." : "Fetches and merges the remote branch into the current branch.");
+      return say(
+        (has("--rebase") ? "Fetches and rebases your local commits on top of the remote branch." : "Fetches and merges the remote branch into the current branch.") +
+          (has("--autostash") ? " --autostash: uncommitted changes are put aside first and restored afterwards." : ""),
+      );
     case "push":
       if (has("--delete")) return say("Deletes that branch on the remote.", true);
       if (has("--force-with-lease")) return say("Overwrites the remote branch with yours (only if nobody pushed since your last fetch). Remote commits you do not have are lost.", true);
@@ -4201,7 +4213,7 @@ function moreMenu(): MenuItem[] {
     ...items,
     { label: pinned ? "Unpin this project" : "Pin this project", run: () => updateProject(r.root, { pinned: !pinned }) },
     "-",
-    { label: "Pull (rebase)", run: () => act("Pull (rebase)", () => r.pull(true)) },
+    { label: "Pull (rebase)", run: () => act("Pull (rebase)", () => r.pull(true, { autostash: pullAutostash })) },
     {
       label: "Force push (with lease)…",
       run: async () => {
@@ -4221,6 +4233,10 @@ function moreMenu(): MenuItem[] {
     {
       label: `${confirmGit ? "✓ " : ""}Ask before Git commands`,
       run: () => setConfirmGit(!confirmGit),
+    },
+    {
+      label: `${pullAutostash ? "✓ " : ""}Auto-stash on pull`,
+      run: () => setPullAutostash(!pullAutostash),
     },
     ...(canCopyAsFile
       ? [
@@ -4254,12 +4270,12 @@ $("branch-btn").addEventListener("click", () =>
 );
 $("sync-btn").addEventListener("click", () =>
   act("Sync", async () => {
-    await repo!.pull();
+    await repo!.pull(false, { autostash: pullAutostash });
     await repo!.push(true);
   }),
 );
 $("fetch-btn").addEventListener("click", () => act("Fetch", () => repo!.fetch()));
-$("pull-btn").addEventListener("click", () => act("Pull", () => repo!.pull()));
+$("pull-btn").addEventListener("click", () => act("Pull", () => repo!.pull(false, { autostash: pullAutostash })));
 $("push-btn").addEventListener("click", () => push());
 $("refresh-btn").addEventListener("click", () => refresh().catch(showError));
 $("layout-btn").addEventListener("click", toggleLayout);

@@ -729,8 +729,9 @@ export class Repo {
     await this.git(["fetch", "--all", "--prune", "--progress"]);
   }
 
-  async pull(rebase = false) {
-    await this.git(["pull", "--progress", rebase ? "--rebase" : "--no-edit"]);
+  /** `autostash`: Git puts uncommitted changes aside and restores them after the pull. */
+  async pull(rebase = false, opts: { autostash?: boolean } = {}) {
+    await this.git(["pull", "--progress", rebase ? "--rebase" : "--no-edit", ...(opts.autostash ? ["--autostash"] : [])]);
   }
 
   async push(hasUpstream: boolean, force = false) {
