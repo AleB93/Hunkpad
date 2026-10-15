@@ -276,6 +276,9 @@ async function act(label: string, fn: () => Promise<unknown>) {
 /** For a fetch / pull / push the server turned away: where to choose the account. */
 function signInHint(e: GitError): string {
   const sub = e.args.find((a) => ["fetch", "pull", "push", "ls-remote"].includes(a));
+  // GitHub refuses a token without the workflow scope any push touching .github/workflows.
+  if (sub && /without `?workflow`? scope/i.test(e.message))
+    return "The access token lacks the workflow scope needed to push changes to .github/workflows: create one with the repo and workflow scopes, then use it with ⋯ → Sign in…";
   const refused = /repository not found|authentication failed|could not read (username|password)|permission .* denied|403/i;
   return sub && refused.test(e.message)
     ? "Wrong account, or no login saved? Choose the account this repository uses with ⋯ → Sign in…"
@@ -4168,7 +4171,7 @@ async function signIn(rm?: Remote) {
   $("signin-help").textContent =
     `${t.host} does not take your account password here: use a personal access token, created while signed in to ` +
     `${t.host} as that account, with access to this repository` +
-    (t.host === "github.com" ? " (classic token: the repo scope)" : "") +
+    (t.host === "github.com" ? " (classic token: the repo and workflow scopes; without workflow, pushes that change .github/workflows are refused)" : "") +
     ". It is kept by Git's credential helper (e.g. the macOS Keychain), not by Hunkpad.";
   signinError.textContent = "";
   signinDialog.returnValue = "";

@@ -120,7 +120,7 @@ fn open_git_download() -> Result<(), String> {
 #[tauri::command]
 fn open_token_page(host: String) -> Result<(), String> {
     let url = match host.as_str() {
-        "github.com" => "https://github.com/settings/tokens/new?scopes=repo&description=Hunkpad",
+        "github.com" => "https://github.com/settings/tokens/new?scopes=repo,workflow&description=Hunkpad",
         "gitlab.com" => {
             "https://gitlab.com/-/user_settings/personal_access_tokens?name=Hunkpad&scopes=read_repository,write_repository"
         }
