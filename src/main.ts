@@ -3175,7 +3175,7 @@ async function loadHistory(reset: boolean) {
 function commitMenu(c: Commit): MenuItem[] {
   const r = repo!;
   return [
-    { label: "Checkout (detached)", run: () => act("Checkout", () => r.checkoutDetached(c.sha)) },
+    { label: "Checkout (detached)", run: () => checkoutAct(c.shortSha, () => r.checkoutDetached(c.sha)) },
     {
       label: "Create branch here…",
       run: async () => {
@@ -3258,14 +3258,32 @@ async function renderHistory() {
 
 // ---- Branches tab ---------------------------------------------------------
 
+const checkoutAutostash = $<HTMLInputElement>("checkout-autostash");
+checkoutAutostash.checked = loadFlag("checkoutAutostash", true);
+checkoutAutostash.addEventListener("change", () => saveFlag("checkoutAutostash", checkoutAutostash.checked));
+
+/** A checkout, wrapped in the auto-stash when that option is on. */
+function checkoutAct(name: string, run: () => Promise<void>) {
+  const r = repo!;
+  const label = `Checkout ${name}`;
+  if (!checkoutAutostash.checked) return act(label, run);
+  return act(label, async () => {
+    const { conflicted } = await r.withAutostash(name, run);
+    if (conflicted)
+      throw new Error(
+        `Switched to ${name}, but your uncommitted changes conflict with it: they are applied with conflict markers and also kept in the stash “hunkpad autostash: ${name}”. Resolve the conflicts, then drop that stash.`,
+      );
+  });
+}
+
 async function checkoutRef(ref: Ref, refs: Ref[]) {
   const r = repo!;
-  if (ref.kind === "local") return act(`Checkout ${ref.name}`, () => r.checkout(ref.name));
-  if (ref.kind === "tag") return act(`Checkout ${ref.name}`, () => r.checkoutDetached(ref.name));
+  if (ref.kind === "local") return checkoutAct(ref.name, () => r.checkout(ref.name));
+  if (ref.kind === "tag") return checkoutAct(ref.name, () => r.checkoutDetached(ref.name));
   // Remote branch: switch to the local one if it exists, else create a tracking branch.
   const localName = ref.name.slice(ref.name.indexOf("/") + 1);
   const local = refs.find((x) => x.kind === "local" && x.name === localName);
-  return act(`Checkout ${localName}`, () => (local ? r.checkout(localName) : r.checkoutTracking(ref.name)));
+  return checkoutAct(localName, () => (local ? r.checkout(localName) : r.checkoutTracking(ref.name)));
 }
 
 function refMenu(ref: Ref, refs: Ref[]): MenuItem[] {

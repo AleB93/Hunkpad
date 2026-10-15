@@ -126,6 +126,9 @@
         <div id="panel-branches" class="panel hidden">
           <div class="filter-bar">
             <input id="branch-filter" type="search" placeholder="Filter branches and tags…" autocomplete="off" spellcheck="false" />
+            <label class="small check" title="On checkout: stash uncommitted changes (untracked too), switch, then pop them back">
+              <input id="checkout-autostash" type="checkbox" /> Auto-stash on checkout
+            </label>
           </div>
           <div id="branch-list"></div>
         </div>

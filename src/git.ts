@@ -627,6 +627,45 @@ export class Repo {
     await this.git(["checkout", "--track", remoteRef]);
   }
 
+  /**
+   * Runs a checkout with the auto-stash Git only offers for rebase / merge:
+   * uncommitted changes (untracked files too) go into a stash, `checkout` runs,
+   * the stash is popped. A failed checkout gets them back at once. When the pop
+   * conflicts, Git keeps the stash; `conflicted` says so.
+   */
+  async withAutostash(label: string, checkout: () => Promise<void>): Promise<{ conflicted: boolean }> {
+    const dirty = (await this.read(["status", "--porcelain", "-uall"])).trim() !== "";
+    if (!dirty) {
+      await checkout();
+      return { conflicted: false };
+    }
+    const top = () => this.read(["rev-parse", "-q", "--verify", "refs/stash"], true).then((s) => s.trim());
+    const before = await top();
+    await this.git(["stash", "push", "-u", "-m", `hunkpad autostash: ${label}`]);
+    const ours = await top();
+    if (!ours || ours === before) {
+      await checkout(); // nothing was stashed after all
+      return { conflicted: false };
+    }
+    const pop = async () => {
+      if ((await this.read(["rev-parse", "-q", "--verify", "stash@{0}"], true)).trim() !== ours)
+        throw new Error("the auto-stash is no longer the newest stash: apply it from the Stashes tab");
+      await this.git(["stash", "pop", "stash@{0}"]);
+    };
+    try {
+      await checkout();
+    } catch (e) {
+      await pop().catch(() => {}); // back as before; if even that fails the stash stays listed
+      throw e;
+    }
+    try {
+      await pop();
+      return { conflicted: false };
+    } catch {
+      return { conflicted: true };
+    }
+  }
+
   async createBranch(name: string, startPoint?: string) {
     await this.git(["checkout", "-b", name, ...(startPoint ? [startPoint] : [])]);
   }

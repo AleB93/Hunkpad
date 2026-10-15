@@ -250,6 +250,8 @@ dialog select {
 }
 
 .filter-bar { position: sticky; top: 0; z-index: 1; padding: 6px 10px; background: var(--bg-side); }
+.filter-bar label.check { display: flex; align-items: center; gap: 5px; margin-top: 5px; color: var(--muted); cursor: pointer; }
+.filter-bar label.check input { width: auto; margin: 0; }
 .filter-bar input {
   width: 100%;
   font: inherit;
