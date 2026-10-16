@@ -1,19 +1,63 @@
-# Builds the installers on Windows, macOS (Apple Silicon and Intel) and Linux
-# when a version tag is pushed, and attaches them to a draft GitHub release.
-# Release: `npm version 0.2.0 && git push --follow-tags`, then review and
-# publish the draft on GitHub (its notes come from docs/release-notes/).
+# Releases a new version whenever the version in package.json changes on
+# master: builds the installers on Windows, macOS (Apple Silicon and Intel) and
+# Linux, and publishes them as release v<version> once all four builds pass.
+# The release text is docs/release-notes/v<version>.md (if it exists).
+#
+# To release: `npm version 0.3.0 --no-git-tag-version`, write the notes, commit, push.
 name: Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [master]
+    # The workflow file too, so a change to it releases a version not released yet.
+    paths: [package.json, .github/workflows/release.yml]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  # Is this a version that has no release yet? Then create it as a draft.
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      release_id: ${{ steps.create.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version without a release
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          draft=$(gh release view "v$version" --json isDraft -q .isDraft 2>/dev/null || echo none)
+          if [ "$draft" = "false" ]; then
+            echo "v$version is already released: nothing to do."
+            exit 0
+          fi
+          # A draft left by a failed run is replaced (re-run with "Run workflow").
+          [ "$draft" = "true" ] && gh release delete "v$version" --yes
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create the draft release
+        id: create
+        if: steps.check.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          notes="docs/release-notes/v$VERSION.md"
+          [ -f "$notes" ] || { echo "See CHANGELOG.md." > /tmp/notes.md; notes=/tmp/notes.md; }
+          gh release create "v$VERSION" --draft --target "$GITHUB_SHA" \
+            --title "Hunkpad v$VERSION" --notes-file "$notes"
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"v$VERSION\") | .id")
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: prepare
+    if: needs.prepare.outputs.version != ''
     strategy:
       fail-fast: false
       matrix:
@@ -51,26 +95,18 @@ jobs:
 
       - run: npm ci
 
-      - name: Release notes for this tag
-        id: notes
-        shell: bash
-        run: |
-          file="docs/release-notes/${GITHUB_REF_NAME}.md"
-          if [ -f "$file" ]; then echo "file=$file" >> "$GITHUB_OUTPUT"; fi
-
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Hunkpad ${{ github.ref_name }}
-          releaseBody: See the notes below and CHANGELOG.md.
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ needs.prepare.outputs.release_id }}
           args: ${{ matrix.args }}
 
-      - name: Use the release notes file as the release body
-        if: steps.notes.outputs.file != '' && matrix.platform == 'ubuntu-22.04'
-        env:
+  # Only when every installer was built: make the release public.
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "$GITHUB_REF_NAME" --notes-file "${{ steps.notes.outputs.file }}"
+        run: gh release edit "v${{ needs.prepare.outputs.version }}" --repo "$GITHUB_REPOSITORY" --draft=false --latest

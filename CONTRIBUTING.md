@@ -91,24 +91,24 @@ Some rules the code follows:
 
 ## Releasing
 
-The version lives in `package.json` only (`tauri.conf.json` reads it from there):
+A release happens by itself when the version in `package.json` changes on
+master. The version lives there only (`tauri.conf.json` reads it from there):
 
-```bash
-npm version 0.2.0
-```
+1. Move the **Unreleased** entries in CHANGELOG.md under the new version, and
+   write `docs/release-notes/v0.3.0.md` (the text of the GitHub release).
+2. Set the version (this also updates `src-tauri/Cargo.toml`):
 
-This also updates `src-tauri/Cargo.toml`, commits and tags `v0.2.0`. Before
-that, move the **Unreleased** entries in CHANGELOG.md under the new version and
-write `docs/release-notes/v0.2.0.md`. Then:
+   ```bash
+   npm version 0.3.0 --no-git-tag-version
+   ```
 
-```bash
-git push --follow-tags
-```
+3. Commit and push to master.
 
-The tag starts the **Release** workflow (`.github/workflows/release.yml`): it
-builds the installers on Windows, macOS (Apple Silicon and Intel) and Linux and
-attaches them to a **draft** release whose text is the release-notes file.
-Check the draft on GitHub and publish it.
+The **Release** workflow (`.github/workflows/release.yml`) then builds the
+installers on Windows, macOS (Apple Silicon and Intel) and Linux, and publishes
+release `v0.3.0` (creating the tag) once all four builds pass. If a build fails,
+fix it, push, and start the workflow again from the Actions tab (**Run
+workflow**): the half-made draft release is replaced.
 
 ## Screenshots
 
