@@ -97,4 +97,32 @@ The version lives in `package.json` only (`tauri.conf.json` reads it from there)
 npm version 0.2.0
 ```
 
-This also updates `src-tauri/Cargo.toml`, commits and tags `v0.2.0`.
+This also updates `src-tauri/Cargo.toml`, commits and tags `v0.2.0`. Before
+that, move the **Unreleased** entries in CHANGELOG.md under the new version and
+write `docs/release-notes/v0.2.0.md`. Then:
+
+```bash
+git push --follow-tags
+```
+
+The tag starts the **Release** workflow (`.github/workflows/release.yml`): it
+builds the installers on Windows, macOS (Apple Silicon and Intel) and Linux and
+attaches them to a **draft** release whose text is the release-notes file.
+Check the draft on GitHub and publish it.
+
+## Screenshots
+
+The images in `docs/media/` come from demo mode: the real UI in a browser,
+with the Tauri commands answered by the Vite dev server against a sample
+repository it generates in the temp folder (`demo/make-repo.sh`).
+
+```bash
+npm run demo                 # http://localhost:1421
+```
+
+With that running, in another terminal (needs Google Chrome):
+
+```bash
+npm i --no-save playwright-core gifenc pngjs
+node demo/capture.mjs        # rewrites docs/media/*.png and *.gif
+```

@@ -1,15 +1,70 @@
-# Hunkpad
+<p align="center">
+  <img src="app-icon.svg" width="96" alt="Hunkpad icon">
+</p>
 
-A lightweight, free and open-source Git client for **Windows, macOS and Linux**:
-VS Code-quality diffs and Source Control features, without running VS Code.
+<h1 align="center">Hunkpad</h1>
 
-Built with [Tauri 2](https://tauri.app/) (Rust and the system's own WebView) and
-the [Monaco](https://microsoft.github.io/monaco-editor/) diff editor, the same
-diff component VS Code uses. It runs the `git` command line you already have,
-so it behaves exactly like Git in a terminal: your config, hooks and credential
-manager included.
+<p align="center">
+  <b>A lightweight, free and open-source Git client with VS Code-quality diffs.</b><br>
+  Stage single lines, review your own changes, and see every Git command before it runs.<br>
+  Windows · macOS · Linux
+</p>
 
-## Features
+<p align="center">
+  <a href="https://github.com/AleB93/Hunkpad/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AleB93/Hunkpad?sort=semver"></a>
+  <a href="https://github.com/AleB93/Hunkpad/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/AleB93/Hunkpad/total"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/AleB93/Hunkpad"></a>
+  <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue">
+</p>
+
+<p align="center">
+  <img src="docs/media/overview.png" alt="Hunkpad: the changes list and the All changes overview" width="900">
+</p>
+
+Hunkpad is built with [Tauri 2](https://tauri.app/) (Rust and the system's own
+WebView) and the [Monaco](https://microsoft.github.io/monaco-editor/) diff
+editor, the same diff component VS Code uses. It runs the `git` command line you
+already have, so it behaves exactly like Git in a terminal: your config, hooks
+and credential manager included. No accounts, no telemetry, a small download.
+
+**[⬇ Download the latest release](https://github.com/AleB93/Hunkpad/releases/latest)**
+
+## Highlights
+
+### Stage exactly the lines you mean
+
+Put the cursor in a change (or select some lines) and **Stage selection**. The
+rest of the file stays unstaged. *Revert selection* and *Unstage selection* work
+the same way.
+
+<p align="center"><img src="docs/media/line-staging.gif" alt="Staging single change blocks from the diff" width="900"></p>
+
+### See every Git command before it runs
+
+Every action that changes something shows the exact command line, what it does
+(destructive ones in red), the folder and any input such as the commit message.
+Cancel stops the whole action. Turn it off in ⋯ → *Ask before Git commands*.
+
+<p align="center"><img src="docs/media/confirm-git.gif" alt="The confirmation dialog shown before a commit" width="900"></p>
+
+### Review your own changes, then hand them to an LLM
+
+Comment any line of a diff. Comments follow their line as code moves, and are
+listed by file in the **Comments** tab. **Copy for LLM** puts the diff and its
+comments in one Markdown file, ready to paste into a chat.
+
+<p align="center"><img src="docs/media/comments.gif" alt="Adding a review comment and opening the Comments tab" width="900"></p>
+
+### And the rest of a daily Git client
+
+| | |
+| --- | --- |
+| <img src="docs/media/history.png" alt="History with a commit's files and diff"> | <img src="docs/media/branches.png" alt="Branches, remote branches, tags and remotes"> |
+| **History**: every commit's files and diffs; checkout, cherry-pick, revert, reset. | **Branches & tags**: favourites, filter, merge, rebase with auto-stash, remotes. |
+| <img src="docs/media/diff-dark.png" alt="Side-by-side diff in dark theme"> | <img src="docs/media/comments.png" alt="The Comments tab"> |
+| **Light and dark** follow the OS. Side by side or inline diffs. | **Comments**: open, resolved and outdated, grouped by file. |
+
+## All features
 
 - **Changes**: staged / unstaged / conflicted files, live refresh via a file
   watcher; stage, unstage, discard per file or all.
@@ -79,24 +134,30 @@ manager included.
 
 ## Install
 
-Hunkpad needs **Git** installed:
+Download the installer for your system from the
+**[latest release](https://github.com/AleB93/Hunkpad/releases/latest)**:
+
+| System | File |
+| --- | --- |
+| Windows 10/11 | `Hunkpad_x.y.z_x64-setup.exe` (or the `.msi`) |
+| macOS, Apple Silicon | `Hunkpad_x.y.z_aarch64.dmg` |
+| macOS, Intel | `Hunkpad_x.y.z_x64.dmg` |
+| Linux | `.AppImage`, `.deb` or `.rpm` |
+
+Hunkpad needs **Git** installed (it tells you how if it is missing):
 
 - **Windows**: [Git for Windows](https://git-scm.com/download/win).
 - **macOS**: run `xcode-select --install` in Terminal, or `brew install git`.
 - **Linux**: your package manager, e.g. `sudo apt install git`.
 
-Ready-made installers are not published yet. Until then, build it from source:
-see [CONTRIBUTING.md](CONTRIBUTING.md#build). Then:
+The installers are not code-signed yet:
 
-- **Windows**: run the installer from `src-tauri/target/release/bundle/`.
-  Windows SmartScreen may warn that the app is from an unknown publisher (it is
-  not code-signed): click **More info → Run anyway**.
-- **macOS**: open the `.dmg` from `src-tauri/target/release/bundle/dmg/` and drag
-  Hunkpad to Applications. A build you made yourself opens normally. A copy
-  downloaded from elsewhere is not notarized by Apple: if macOS refuses to open
-  it, go to **System Settings → Privacy & Security** and click **Open Anyway**.
-- **Linux**: install the `.deb` or `.rpm`, or run the `.AppImage`, from
-  `src-tauri/target/release/bundle/`.
+- **Windows**: SmartScreen may warn that the app is from an unknown publisher:
+  click **More info → Run anyway**.
+- **macOS**: if macOS refuses to open it, go to **System Settings → Privacy &
+  Security** and click **Open Anyway** (once).
+
+To build it yourself, see [CONTRIBUTING.md](CONTRIBUTING.md#build).
 
 ## Keyboard shortcuts
 

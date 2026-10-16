@@ -6,6 +6,8 @@ All notable changes to Hunkpad are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-16
+
 ### Changed
 
 - Renamed from Diffpane to **Hunkpad** (app ID `io.github.aleb93.hunkpad`). A
@@ -31,6 +33,10 @@ All notable changes to Hunkpad are listed here. The format follows
   scripts, and it runs with `npm run` in that folder.
 - A strict Content Security Policy for the app's page.
 - Tests for the Git output parsers, run against real Git.
+- Ready-made installers for Windows, macOS (Apple Silicon and Intel) and Linux,
+  built by GitHub Actions for each release.
+- `npm run demo`: the app in a browser on a generated sample repository (used
+  for the screenshots in the README).
 
 ### Fixed
 
@@ -40,3 +46,6 @@ All notable changes to Hunkpad are listed here. The format follows
 ## [0.1.0]
 
 First version (as Diffpane), for Windows.
+
+[Unreleased]: https://github.com/AleB93/Hunkpad/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/AleB93/Hunkpad/releases/tag/v0.2.0
