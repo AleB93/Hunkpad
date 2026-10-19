@@ -28,6 +28,8 @@ import {
   setRunObserver,
   setLogger,
 } from "./git";
+import { isMarkdown, isWebLink, markdownToHtml, resolveRepoPath, slug } from "./markdown";
+import { TextMatch, TextSearchOptions, grepArgs, matchRange, parseGrep, rankFiles } from "./search";
 import { LineChange, applyLineChanges, applyLineChangesWithRanges } from "./lineChanges";
 import { PatchFile, parsePatch, untrackedPatch } from "./overview";
 import { ReviewComment, loadComments, locate, newCommentId, saveComments } from "./comments";
@@ -752,6 +754,7 @@ async function showDiff(t: DiffTarget, opts: { wholeFile?: boolean } = {}) {
   renderDiffActions();
   markSelected();
   renderCommentZones();
+  renderMarkdownPreview();
 }
 
 /** Deselects the file: back to the overview of all changes (or the placeholder). */
@@ -768,7 +771,105 @@ function clearDiff() {
   markSelected();
   renderOverview().catch(showError);
   renderCommentZones();
+  renderMarkdownPreview();
 }
+
+// ---- Markdown preview (markdown.ts) -----------------------------------------
+//
+// A Markdown file opens rendered (its current version: the right side of the
+// diff); "⇆ Diff" switches back to the diff, and the choice is remembered.
+
+const mdPane = $("md-preview");
+let mdPreviewOn = loadFlag("mdPreview", true);
+/** What the pane shows now, so an auto-refresh with the same text keeps the scroll. */
+let mdShown: { path: string; text: string } | null = null;
+let mdBlobUrls: string[] = [];
+
+const showsMarkdown = () => !!target && !!sides && !sides.binary && isMarkdown(target.path);
+
+function renderMarkdownPreview() {
+  if (!mdPreviewOn || !showsMarkdown() || !repo) {
+    mdPane.classList.add("hidden");
+    mdShown = null;
+    return;
+  }
+  const path = target!.path;
+  const text = sides!.modified;
+  mdPane.classList.remove("hidden");
+  if (mdShown?.path === path && mdShown.text === text) return;
+  const samePath = mdShown?.path === path;
+  const scroll = mdPane.scrollTop;
+  mdShown = { path, text };
+  for (const url of mdBlobUrls) URL.revokeObjectURL(url);
+  mdBlobUrls = [];
+
+  const body = h("article", { class: "markdown" });
+  body.innerHTML = markdownToHtml(text);
+  const used = new Map<string, number>();
+  body.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6").forEach((el) => {
+    const base = slug(el.textContent ?? "");
+    const n = used.get(base) ?? 0;
+    used.set(base, n + 1);
+    el.id = n ? `${base}-${n}` : base;
+  });
+  const root = repo.root;
+  body.querySelectorAll("img").forEach((img) => {
+    const src = img.getAttribute("src") ?? "";
+    if (src.startsWith("data:")) return;
+    if (/^([a-z]+:)?\/\//i.test(src)) {
+      // Remote images are not loaded (privacy, and the app's CSP): a link instead.
+      const link = h("a", { href: src, class: "md-remote-img", title: src }, `🖼 ${img.alt || "image"}`);
+      img.replaceWith(link);
+      return;
+    }
+    const file = resolveRepoPath(path, src.split(/[?#]/)[0]);
+    img.removeAttribute("src");
+    if (!file) return;
+    invoke<ArrayBuffer>("read_image", { repo: root, path: file })
+      .then((bytes) => {
+        const type = file.toLowerCase().endsWith(".svg") ? "image/svg+xml" : "";
+        const url = URL.createObjectURL(new Blob([bytes], type ? { type } : {}));
+        mdBlobUrls.push(url);
+        img.src = url;
+      })
+      .catch(() => (img.title = `${file}: not found`));
+  });
+  mdPane.replaceChildren(body);
+  mdPane.scrollTop = samePath ? scroll : 0;
+}
+
+function toggleMarkdownPreview() {
+  mdPreviewOn = !mdPreviewOn;
+  saveFlag("mdPreview", mdPreviewOn);
+  renderDiffActions();
+  renderMarkdownPreview();
+}
+
+/** Links never navigate the app's page: web links open in the browser, repo files open here. */
+mdPane.addEventListener("click", async (e) => {
+  const a = (e.target as HTMLElement).closest("a");
+  if (!a) return;
+  e.preventDefault();
+  const href = a.getAttribute("href") ?? "";
+  if (!href || !repo || !target) return;
+  if (isWebLink(href)) {
+    invoke("open_link", { url: href }).catch(showError);
+    return;
+  }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return setStatus(`Not opened: ${href}`, true);
+  const [file, anchor] = href.split("#");
+  const scrollTo = () => {
+    if (!anchor) return;
+    const el = mdPane.querySelector(`#${CSS.escape(decodeURIComponent(anchor))}`);
+    el?.scrollIntoView({ block: "start" });
+  };
+  if (!file) return scrollTo();
+  const path = resolveRepoPath(target.path, file);
+  const exists = !!path && (await invoke<boolean>("is_file", { path: `${repo.root}/${path}` }));
+  if (!path || !exists) return setStatus(`Not a file in the repository: ${file}`, true);
+  await showDiff({ kind: "worktree", path, conflict: false }, { wholeFile: true }).catch(showError);
+  scrollTo();
+});
 
 // ---- review comments in the diff (comments.ts) ------------------------------
 //
@@ -1635,6 +1736,12 @@ function renderDiffActions() {
   if (!t || !status) return;
   const file = status.files.find((f) => f.path === t.path);
   const btn = (label: string, title: string, run: () => void) => h("button", { title, onclick: run }, label);
+  if (showsMarkdown())
+    bar.append(
+      mdPreviewOn
+        ? btn("⇆ Diff", "Show the changes instead of the rendered file", toggleMarkdownPreview)
+        : btn("👁 Preview", "Show the Markdown rendered", toggleMarkdownPreview),
+    );
   // "Compare with" applies to a current file (not history diffs or conflicts).
   if (t.kind === "vsref" || t.kind === "index" || t.kind === "blocks" || (t.kind === "worktree" && !t.conflict)) {
     const compare = h("button", { title: "Compare this file with your changes, the upstream branch or another branch" }, "⇄ Compare ▾");
@@ -3839,6 +3946,18 @@ $("qa-terminal").addEventListener("click", async () => {
   }
 });
 
+$("qa-copy-path").addEventListener("click", async () => {
+  if (!repo) return;
+  // Git gives C:/x/y; Windows tools expect C:\x\y.
+  const path = isWindows ? repo.root.replace(/\//g, "\\") : repo.root;
+  try {
+    await navigator.clipboard.writeText(path);
+    setStatus(`Copied ${path}`);
+  } catch (e) {
+    setStatus(`Could not copy the path: ${errorText(e)}`, true);
+  }
+});
+
 $("add-script").addEventListener("click", async () => {
   const s = await scriptDialogFor();
   if (s) updateScripts((list) => [...list, s]);
@@ -3959,6 +4078,331 @@ $("projects-clone").addEventListener("click", () => {
   clone();
 });
 $("projects-close").addEventListener("click", () => projectsDialog.close());
+
+// ---- search: file names (Ctrl+P), text (Ctrl+Shift+F), Ctrl+click on a word ----
+//
+// All on Git (search.ts): nothing is indexed, nothing stays in memory. A result
+// opens the file on disk, whole, at the matching line.
+
+type SearchMode = "files" | "text";
+
+const searchDialog = $<HTMLDialogElement>("search-dialog");
+const searchInput = $<HTMLInputElement>("search-input");
+const searchResults = $("search-results");
+const searchInfo = $("search-info");
+let searchMode: SearchMode = "files";
+const searchQueries: Record<SearchMode, string> = { files: "", text: "" };
+const savedSearchOpts = (): TextSearchOptions => ({
+  matchCase: loadFlag("searchMatchCase", false),
+  wholeWord: loadFlag("searchWholeWord", false),
+  regex: loadFlag("searchRegex", false),
+});
+let searchOpts = savedSearchOpts();
+/** The repo's files, listed once each time the dialog opens. */
+let searchFileList: { root: string; paths: Promise<string[]> } | null = null;
+/** The selectable rows, in order: what Enter / a click opens. */
+let searchRows: (() => void)[] = [];
+let searchIndex = 0;
+let searchSeq = 0;
+let searchTimer: number | undefined;
+let searchDirty = false;
+
+/** `opts` (e.g. whole word for Ctrl+click) apply to this search only; the toggles' saved state stays. */
+function showSearch(mode: SearchMode, query?: string, opts?: Partial<TextSearchOptions>) {
+  if (!repo) return;
+  if (searchDialog.open) searchQueries[searchMode] = searchInput.value;
+  else searchFileList = null;
+  searchMode = mode;
+  searchOpts = { ...savedSearchOpts(), ...opts };
+  searchInput.value = query ?? searchQueries[mode];
+  renderSearchChrome();
+  if (!searchDialog.open) searchDialog.showModal();
+  searchInput.focus();
+  searchInput.select();
+  runSearch();
+}
+
+function renderSearchChrome() {
+  searchDialog.classList.toggle("files", searchMode === "files");
+  searchInput.placeholder =
+    searchMode === "files" ? "Find a file by name…" : "Find text in all files (tracked and untracked)…";
+  searchDialog.querySelectorAll<HTMLButtonElement>("#search-mode button").forEach((b) =>
+    b.classList.toggle("active", b.dataset.mode === searchMode),
+  );
+  searchDialog.querySelectorAll<HTMLButtonElement>("#search-opts button").forEach((b) =>
+    b.classList.toggle("active", searchOpts[b.dataset.opt as keyof TextSearchOptions]),
+  );
+}
+
+function runSearch() {
+  clearTimeout(searchTimer);
+  searchDirty = false;
+  (searchMode === "files" ? searchFiles() : searchText()).catch((e) => {
+    searchRows = [];
+    searchResults.replaceChildren();
+    searchInfo.textContent = errorText(e);
+  });
+}
+
+function highlightSearch(i: number) {
+  searchIndex = i;
+  searchResults.querySelectorAll<HTMLElement>("[data-index]").forEach((el) => {
+    const on = Number(el.dataset.index) === i;
+    el.classList.toggle("selected", on);
+    if (on) el.scrollIntoView({ block: "nearest" });
+  });
+}
+
+/** A selectable result row. */
+function searchRow(cls: string, title: string, open: () => void, ...children: Child[]): HTMLElement {
+  const i = searchRows.push(open) - 1;
+  return h(
+    "div",
+    {
+      class: cls,
+      title,
+      "data-index": i,
+      onclick: open,
+      onmousemove: () => searchIndex !== i && highlightSearch(i),
+    },
+    ...children,
+  );
+}
+
+function showResults(rows: HTMLElement[]) {
+  searchResults.replaceChildren(...rows);
+  searchResults.scrollTop = 0;
+  highlightSearch(0);
+}
+
+/** `text[from, to)` with the characters at `hits` in <mark>. */
+function marked(text: string, from: number, to: number, hits: number[]): Child[] {
+  const out: Child[] = [];
+  const set = new Set(hits);
+  let run = "";
+  let inHit = false;
+  const flush = () => {
+    if (run) out.push(inHit ? h("mark", {}, run) : run);
+    run = "";
+  };
+  for (let i = from; i < to; i++) {
+    if (set.has(i) !== inHit) {
+      flush();
+      inHit = !inHit;
+    }
+    run += text[i];
+  }
+  flush();
+  return out;
+}
+
+async function searchFiles() {
+  const r = repo!;
+  const seq = ++searchSeq;
+  if (!searchFileList || searchFileList.root !== r.root) {
+    searchInfo.textContent = "Listing files…";
+    // Shared by the keystrokes typed meanwhile; a failure is not kept.
+    const paths = r.listFiles().catch((e) => {
+      searchFileList = null;
+      throw e;
+    });
+    searchFileList = { root: r.root, paths };
+  }
+  const all = await searchFileList.paths;
+  if (seq !== searchSeq) return;
+  const ranked = rankFiles(searchInput.value, all, 100);
+  searchRows = [];
+  showResults(
+    ranked.map((m) => {
+      const slash = m.path.lastIndexOf("/") + 1;
+      return searchRow(
+        "item",
+        m.path,
+        () => openSearchResult(m.path),
+        h("span", { class: "name" }, ...marked(m.path, slash, m.path.length, m.hits)),
+        h("span", { class: "dir" }, ...marked(m.path, 0, slash, m.hits)),
+      );
+    }),
+  );
+  searchInfo.textContent = searchInput.value.trim()
+    ? `${ranked.length === 100 ? "First 100" : ranked.length} of ${all.length} files`
+    : `${all.length} files`;
+}
+
+async function searchText() {
+  const r = repo!;
+  const query = searchInput.value;
+  const opts = { ...searchOpts };
+  const seq = ++searchSeq;
+  if (!query) {
+    searchRows = [];
+    searchResults.replaceChildren();
+    searchInfo.textContent = "Type to search; Enter searches at once.";
+    return;
+  }
+  searchInfo.textContent = "Searching…";
+  const out = await r.grep(grepArgs(query, opts));
+  if (seq !== searchSeq) return;
+  const { matches, truncated } = parseGrep(out);
+  const byFile = new Map<string, TextMatch[]>();
+  for (const m of matches) byFile.set(m.path, [...(byFile.get(m.path) ?? []), m]);
+
+  searchRows = [];
+  const rows: HTMLElement[] = [];
+  for (const [path, list] of byFile) {
+    const slash = path.lastIndexOf("/") + 1;
+    rows.push(
+      h(
+        "div",
+        { class: "section-head", title: path, onclick: () => openSearchResult(path, list[0], query, opts) },
+        h("span", {}, path.slice(slash)),
+        h("span", { class: "dir" }, path.slice(0, slash)),
+        h("span", { class: "spacer" }),
+        h("span", { class: "count" }, String(list.length)),
+      ),
+    );
+    for (const m of list)
+      rows.push(
+        searchRow(
+          "item hit",
+          `${path}:${m.line}`,
+          () => openSearchResult(path, m, query, opts),
+          h("span", { class: "ln" }, String(m.line)),
+          h("span", { class: "line" }, ...hitLine(m, query, opts)),
+        ),
+      );
+  }
+  showResults(rows);
+  searchInfo.textContent = !matches.length
+    ? "No results"
+    : truncated
+      ? `First ${matches.length} results, in ${byFile.size} files: refine the search to see the rest`
+      : `${matches.length} results in ${byFile.size} files`;
+}
+
+/** The matched line, trimmed, with the match in <mark>; long lines are cut around the match. */
+function hitLine(m: TextMatch, query: string, opts: TextSearchOptions): Child[] {
+  const text = m.text;
+  const [start, end] = matchRange(text, query, opts, m.column - 1) ?? [m.column - 1, m.column - 1];
+  let from = text.length - text.trimStart().length;
+  if (start - from > 80) from = start - 40;
+  const to = Math.min(text.length, Math.max(end, from + 400));
+  return [text.slice(from, start), h("mark", {}, text.slice(start, end)), text.slice(end, to)];
+}
+
+/** Opens the file on disk (whole) and, for a text match, selects it. */
+async function openSearchResult(path: string, m?: TextMatch, query?: string, opts?: TextSearchOptions) {
+  searchDialog.close();
+  const conflict = !!status?.files.find((f) => f.path === path)?.conflict;
+  try {
+    await showDiff({ kind: "worktree", path, conflict }, { wholeFile: true });
+  } catch (e) {
+    return showError(e);
+  }
+  if (!m) return;
+  revealLine(m.line, "modified");
+  const range = query && opts ? matchRange(m.text, query, opts, m.column - 1) : null;
+  if (range) modifiedEditor.setSelection(new monaco.Range(m.line, range[0] + 1, m.line, range[1] + 1));
+}
+
+/** Ctrl+click / Shift+F12 on a word: every place it appears, as a whole word, matching case. */
+function findReferences(word: string) {
+  showSearch("text", word, { matchCase: true, wholeWord: true, regex: false });
+}
+
+searchInput.addEventListener("input", () => {
+  if (searchMode === "files") return runSearch();
+  searchDirty = true;
+  clearTimeout(searchTimer);
+  searchTimer = window.setTimeout(runSearch, 300);
+});
+searchInput.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    highlightSearch(Math.min(searchIndex + 1, searchRows.length - 1));
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    highlightSearch(Math.max(searchIndex - 1, 0));
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    if (searchDirty) runSearch();
+    else searchRows[searchIndex]?.();
+  } else if (e.key === "Tab") {
+    e.preventDefault();
+    showSearch(searchMode === "files" ? "text" : "files");
+  }
+});
+searchDialog.querySelectorAll<HTMLButtonElement>("#search-mode button").forEach((b) =>
+  b.addEventListener("click", () => showSearch(b.dataset.mode as SearchMode)),
+);
+const searchFlagKeys: Record<keyof TextSearchOptions, string> = {
+  matchCase: "searchMatchCase",
+  wholeWord: "searchWholeWord",
+  regex: "searchRegex",
+};
+searchDialog.querySelectorAll<HTMLButtonElement>("#search-opts button").forEach((b) =>
+  b.addEventListener("click", () => {
+    const key = b.dataset.opt as keyof TextSearchOptions;
+    searchOpts[key] = !searchOpts[key];
+    saveFlag(searchFlagKeys[key], searchOpts[key]);
+    renderSearchChrome();
+    searchInput.focus();
+    runSearch();
+  }),
+);
+$("search-close").addEventListener("click", () => searchDialog.close());
+searchDialog.addEventListener("close", () => (searchQueries[searchMode] = searchInput.value));
+
+// Ctrl+click on a word (either side of the diff) searches for it; holding Ctrl underlines it.
+for (const ed of [diffEditor.getOriginalEditor(), modifiedEditor]) {
+  const link = ed.createDecorationsCollection();
+  const wordAt = (e: monaco.editor.IEditorMouseEvent) => {
+    const p = e.target.position;
+    if (!p || e.target.type !== monaco.editor.MouseTargetType.CONTENT_TEXT) return null;
+    const w = ed.getModel()?.getWordAtPosition(p);
+    return w ? { ...w, line: p.lineNumber } : null;
+  };
+  ed.onMouseMove((e) => {
+    const w = primaryKey(e.event.browserEvent) ? wordAt(e) : null;
+    if (!w) return link.clear();
+    link.set([
+      { range: new monaco.Range(w.line, w.startColumn, w.line, w.endColumn), options: { inlineClassName: "ctrl-link" } },
+    ]);
+  });
+  ed.onMouseLeave(() => link.clear());
+  window.addEventListener("keyup", () => link.clear());
+  ed.onMouseDown((e) => {
+    if (!primaryKey(e.event.browserEvent) || !e.event.leftButton) return;
+    const w = wordAt(e);
+    if (!w) return;
+    e.event.preventDefault();
+    link.clear();
+    findReferences(w.word);
+  });
+  ed.addAction({
+    id: "hunkpad.findReferences",
+    label: "Find references (text search)",
+    contextMenuGroupId: "navigation",
+    contextMenuOrder: 1,
+    keybindings: [monaco.KeyMod.Shift | monaco.KeyCode.F12],
+    run: (ed) => {
+      const p = ed.getPosition();
+      const w = p && ed.getModel()?.getWordAtPosition(p);
+      if (w) findReferences(w.word);
+    },
+  });
+}
+
+/** The editor's selected text (one line), to search for. */
+function editorSelection(): string | undefined {
+  for (const ed of [modifiedEditor, diffEditor.getOriginalEditor()]) {
+    if (!ed.hasTextFocus()) continue;
+    const sel = ed.getSelection();
+    const text = sel && !sel.isEmpty() ? ed.getModel()?.getValueInRange(sel) : undefined;
+    if (text && !text.includes("\n")) return text;
+  }
+  return undefined;
+}
 
 // ---- header actions -------------------------------------------------------
 
@@ -4300,6 +4744,13 @@ window.addEventListener("keydown", (e) => {
     // Also stops the WebView's own Ctrl+R page reload.
     e.preventDefault();
     showProjects();
+  } else if (primaryKey(e) && !e.shiftKey && e.key.toLowerCase() === "p") {
+    // Also stops the WebView's own Ctrl+P print.
+    e.preventDefault();
+    showSearch("files");
+  } else if (primaryKey(e) && e.shiftKey && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    showSearch("text", editorSelection());
   } else if (primaryKey(e) && e.key.toLowerCase() === "w") {
     e.preventDefault();
     if (repo) closeTab(repo.root);

@@ -302,6 +302,39 @@ fn safe_join(repo: &str, path: &str) -> Result<PathBuf, String> {
     Ok(Path::new(repo).join(rel))
 }
 
+/// A work-tree image's bytes, for the Markdown preview: image files only, at most 20 MB.
+#[tauri::command]
+async fn read_image(repo: String, path: String) -> Result<tauri::ipc::Response, String> {
+    const IMAGES: [&str; 9] = ["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico", "avif"];
+    let full = safe_join(&repo, &path)?;
+    let ext = full.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !IMAGES.contains(&ext.as_str()) {
+        return Err(format!("not an image: {path}"));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let len = std::fs::metadata(&full).map_err(|e| format!("{}: {e}", full.display()))?.len();
+        if len > 20 * 1024 * 1024 {
+            return Err(format!("{}: too large to preview", full.display()));
+        }
+        std::fs::read(&full)
+            .map(tauri::ipc::Response::new)
+            .map_err(|e| format!("{}: {e}", full.display()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Opens a link from a Markdown preview in the default browser or mail app
+/// (http, https and mailto only).
+#[tauri::command]
+fn open_link(url: String) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if !["https://", "http://", "mailto:"].iter().any(|p| lower.starts_with(p)) {
+        return Err(format!("not a web link: {url}"));
+    }
+    platform::open_url(&url)
+}
+
 /// Returns the work-tree file, or `None` when it does not exist.
 #[tauri::command]
 async fn read_file(repo: String, path: String) -> Result<Option<String>, String> {
@@ -698,6 +731,8 @@ pub fn run() {
             is_file,
             launch_script,
             open_terminal,
+            read_image,
+            open_link,
             read_package_json,
             migrate_data_dir,
             paths_exist,

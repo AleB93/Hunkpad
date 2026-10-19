@@ -808,6 +808,25 @@ export class Repo {
     if (t) await this.git(["config", "--local", "--unset", accountKey(t)]);
   }
 
+  // ---- search (search.ts) -----------------------------------------------
+
+  /** Tracked and untracked (not ignored) files that exist on disk. */
+  async listFiles(): Promise<string[]> {
+    const [all, deleted] = await Promise.all([
+      this.read(["ls-files", "-z", "--cached", "--others", "--exclude-standard"]),
+      this.read(["ls-files", "-z", "--deleted"]),
+    ]);
+    const gone = new Set(deleted.split("\0"));
+    return [...new Set(all.split("\0"))].filter((p) => p && !gone.has(p));
+  }
+
+  /** `git grep` output for `grepArgs`; empty when nothing matched (exit code 1). */
+  async grep(args: string[]): Promise<string> {
+    const out = await this.git(args, { quiet: true, allowFail: true });
+    if (out.code > 1) throw new GitError(args, out);
+    return out.stdout;
+  }
+
   // ---- stashes ----------------------------------------------------------
 
   async stashes(): Promise<Stash[]> {

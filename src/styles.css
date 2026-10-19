@@ -233,6 +233,24 @@ dialog {
 dialog.picker { width: 600px; padding: 10px; }
 dialog.picker[open] { display: flex; flex-direction: column; gap: 8px; }
 #projects-list { max-height: 55vh; overflow: auto; margin: 0 -10px; }
+
+/* ---- search (Ctrl+P / Ctrl+Shift+F) ---- */
+#search-dialog { width: 760px; }
+.search-head { display: flex; align-items: center; gap: 6px; }
+.search-head .seg { padding: 0; }
+.search-head input { flex: 1; min-width: 0; }
+#search-dialog.files #search-opts { display: none; }
+#search-opts button { font-family: Consolas, "Cascadia Mono", monospace; }
+#search-opts button { border-radius: 4px; margin-left: 2px; }
+#search-results { height: 55vh; overflow: auto; margin: 0 -10px; }
+#search-results .item .name { flex: none; max-width: 45%; }
+#search-results mark { background: none; color: var(--accent); font-weight: 600; }
+#search-results .line mark { background: var(--selected); color: inherit; border-radius: 2px; }
+#search-results .section-head { gap: 6px; cursor: pointer; text-transform: none; letter-spacing: normal; font-size: 12px; }
+#search-results .section-head .dir { color: var(--muted); font-weight: normal; overflow: hidden; text-overflow: ellipsis; }
+#search-results .hit { padding-left: 26px; font: 12px Consolas, "Cascadia Mono", monospace; }
+#search-results .hit .ln { color: var(--muted); min-width: 40px; text-align: right; flex: none; }
+#search-results .hit .line { overflow: hidden; text-overflow: ellipsis; white-space: pre; }
 #projects-list .item { padding-left: 6px; }
 #projects-list .item .dir { font-size: 11px; }
 #projects-list .star { color: var(--mod); }
@@ -700,3 +718,64 @@ body:not(.has-repo) #scriptbar { display: none; }
   white-space: nowrap;
 }
 .menu { max-height: 70vh; overflow-y: auto; }
+#search-results .section-head .count { color: var(--muted); font-weight: normal; padding-right: 10px; }
+/* Ctrl+hover on a word in the diff: Ctrl+click searches for it. */
+.monaco-editor .ctrl-link { text-decoration: underline; cursor: pointer !important; color: var(--accent) !important; }
+
+/* ---- Markdown preview (GitHub-like) ---- */
+#md-preview {
+  z-index: 5; /* above the Monaco editor, like the overview */
+  position: absolute;
+  inset: 32px 0 0 0;
+  overflow: auto;
+  background: var(--bg);
+}
+.markdown {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 20px 32px 48px;
+  font: 14px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
+  overflow-wrap: break-word;
+}
+.markdown > :first-child { margin-top: 0; }
+.markdown h1, .markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 {
+  margin: 24px 0 12px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.markdown h1 { font-size: 2em; padding-bottom: 0.3em; border-bottom: 1px solid var(--border); }
+.markdown h2 { font-size: 1.5em; padding-bottom: 0.3em; border-bottom: 1px solid var(--border); }
+.markdown h3 { font-size: 1.25em; }
+.markdown h4 { font-size: 1em; }
+.markdown h5 { font-size: 0.875em; }
+.markdown h6 { font-size: 0.85em; color: var(--muted); }
+.markdown p, .markdown ul, .markdown ol, .markdown blockquote, .markdown pre, .markdown table { margin: 0 0 16px; }
+.markdown ul, .markdown ol { padding-left: 2em; }
+.markdown li + li { margin-top: 0.25em; }
+.markdown li > p { margin-bottom: 0; }
+.markdown li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.4em; }
+.markdown a { color: var(--accent); text-decoration: none; cursor: pointer; }
+.markdown a:hover { text-decoration: underline; }
+.markdown code {
+  padding: 0.15em 0.4em;
+  font: 85% Consolas, "Cascadia Mono", monospace;
+  background: var(--bg-side);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.markdown pre {
+  padding: 12px 16px;
+  overflow: auto;
+  background: var(--bg-side);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  line-height: 1.45;
+}
+.markdown pre code { padding: 0; font-size: 12.5px; background: none; border: 0; }
+.markdown blockquote { padding: 0 1em; color: var(--muted); border-left: 4px solid var(--border); }
+.markdown table { display: block; width: max-content; max-width: 100%; overflow: auto; border-collapse: collapse; }
+.markdown th, .markdown td { padding: 6px 13px; border: 1px solid var(--border); }
+.markdown th { font-weight: 600; background: var(--bg-side); }
+.markdown hr { height: 0; margin: 24px 0; border: 0; border-top: 2px solid var(--border); }
+.markdown img { max-width: 100%; }
+.markdown .md-remote-img { font-size: 12px; }

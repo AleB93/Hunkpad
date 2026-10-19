@@ -39,6 +39,7 @@
     <div id="quickbar" class="repo-only">
       <span class="small muted">Quick</span>
       <button id="qa-terminal" title="Open a terminal in the repository folder">&gt;_ Terminal here</button>
+      <button id="qa-copy-path" title="Copy the repository folder's path">⧉ Copy path</button>
     </div>
     <!-- The active repository's own scripts: each runs in a new console, in the repo folder. -->
     <div id="scriptbar" class="repo-only">
@@ -159,6 +160,8 @@
         <div id="placeholder" class="muted">Open a project (Ctrl+R) and pick a changed file.</div>
         <!-- Shown when no file is selected: every file's changed chunks. -->
         <div id="overview" class="hidden"></div>
+        <!-- A Markdown file, rendered (toggle with Preview / Diff). -->
+        <div id="md-preview" class="hidden"></div>
       </main>
     </div>
 
@@ -328,6 +331,28 @@
           <button value="ok" class="primary">Save</button>
         </div>
       </form>
+    </dialog>
+
+    <!-- Search: file names (Ctrl+P) or file contents (Ctrl+Shift+F, Ctrl+click on a word). -->
+    <dialog id="search-dialog" class="picker">
+      <div class="search-head">
+        <div class="seg" id="search-mode">
+          <button data-mode="files" title="Find a file by name (Ctrl+P)">Files</button>
+          <button data-mode="text" title="Find text in all files (Ctrl+Shift+F)">Text</button>
+        </div>
+        <input id="search-input" autocomplete="off" spellcheck="false" />
+        <div class="seg" id="search-opts">
+          <button data-opt="matchCase" title="Match case">Aa</button>
+          <button data-opt="wholeWord" title="Whole word">ab</button>
+          <button data-opt="regex" title="Regular expression (extended)">.*</button>
+        </div>
+      </div>
+      <div id="search-results"></div>
+      <div class="row">
+        <span id="search-info" class="small muted"></span>
+        <span class="spacer"></span>
+        <button id="search-close">Close</button>
+      </div>
     </dialog>
 
     <dialog id="projects-dialog" class="picker">

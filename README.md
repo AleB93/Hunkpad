@@ -102,6 +102,12 @@ comments in one Markdown file, ready to paste into a chat.
   (**Move change ▾**), or a file's blocks by drag & drop or the row menu.
   **Commit group** commits only its blocks, built in a temporary index in the OS
   temp folder: other staged work stays staged, hooks run.
+- **Markdown preview**: `.md` files open rendered (GitHub-flavoured: tables,
+  task lists, code blocks); 👁 Preview / ⇆ Diff switches. Repo links open the
+  file here, web links open in the browser, repo images show inline, remote
+  images become links. The HTML is sanitised: nothing in a file can run.
+- **Search**: Ctrl+P finds a file by name, Ctrl+Shift+F finds text in all files
+  (`git grep`, no index), Ctrl+click on a word lists where it is used.
 - **Review comments**: comment any line on the right side of a diff (hover →
   ＋ in the margin, right-click → Add comment, or Ctrl+Alt+M). A **Comments** tab
   lists them by file (Open / Resolved / Outdated / All). Comments follow their
@@ -166,6 +172,10 @@ On macOS, use ⌘ wherever Ctrl is listed (Ctrl+Tab stays Ctrl).
 | Shortcut         | Action                                  |
 | ---------------- | --------------------------------------- |
 | Ctrl+R           | Projects (quick picker with search)     |
+| Ctrl+P           | Find a file by name                     |
+| Ctrl+Shift+F     | Find text in all files (selection prefilled) |
+| Ctrl+click       | On a word in the diff: find where it is used |
+| Shift+F12        | Same, for the word at the cursor        |
 | Ctrl+O           | Open a repository                       |
 | Ctrl+W           | Close the current repository tab        |
 | Ctrl+Tab         | Next tab (Shift for the previous one)   |

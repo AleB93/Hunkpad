@@ -42,7 +42,7 @@ beforeEach(() => {
   git("commit", "-q", "-m", "first");
 });
 
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
+afterEach(() => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
 describe("parseStatus", () => {
   it("reads branch, staged, unstaged, untracked and renamed files", () => {
