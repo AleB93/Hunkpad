@@ -108,7 +108,10 @@
         <div id="panel-changes" class="panel">
           <div id="op-banner" class="banner hidden"></div>
           <div class="commit-box">
-            <textarea id="commit-msg" rows="3" placeholder="Message (Ctrl+Enter to commit)"></textarea>
+            <div class="commit-msg-wrap">
+              <textarea id="commit-msg" rows="3" placeholder="Message (Ctrl+Enter to commit)"></textarea>
+              <button id="claude-msg" class="icon" type="button">✨</button>
+            </div>
             <div class="row">
               <button id="commit-btn" class="primary">Commit</button>
               <label title="Replace the last commit"><input type="checkbox" id="amend-box" /> Amend</label>
@@ -266,6 +269,33 @@
         <div class="row end">
           <button id="comment-cancel" type="button">Cancel</button>
           <button id="comment-save" type="button" class="primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Claude requests (claude.ts). Modes (class on the dialog): send → waiting → result. -->
+    <dialog id="claude-dialog">
+      <form method="dialog" novalidate>
+        <strong id="claude-title">Send to Claude?</strong>
+        <div id="claude-summary" class="small muted"></div>
+        <div class="claude-send">
+          <ul id="claude-files" class="small"></ul>
+          <details>
+            <summary class="small">Show exactly what will be sent</summary>
+            <pre id="claude-payload"></pre>
+          </details>
+          <p class="small muted">
+            Sent through your own <code>claude</code> command line, with its login. Claude gets no tools: it only reads
+            this text and answers. Nothing is changed until you accept the result.
+          </p>
+          <label class="small"><input type="checkbox" id="claude-noask" /> Don't ask again before sending</label>
+        </div>
+        <div class="claude-waiting small"><span class="spinner"></span> <span id="claude-wait-text">Waiting for Claude…</span></div>
+        <div id="claude-result" class="claude-result"></div>
+        <div class="row end">
+          <button id="claude-cancel" type="button">Cancel</button>
+          <button id="claude-alt" type="button"></button>
+          <button id="claude-ok" type="button" class="primary">Send</button>
         </div>
       </form>
     </dialog>

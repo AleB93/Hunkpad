@@ -2,6 +2,7 @@
 //! work-tree files, and watches the repository. All Git logic lives in the
 //! TypeScript frontend (src/git.ts).
 
+mod claude;
 mod platform;
 
 use std::{
@@ -741,7 +742,11 @@ pub fn run() {
             open_git_download,
             open_token_page,
             load_settings,
-            save_settings
+            save_settings,
+            claude::claude_version,
+            claude::run_claude,
+            claude::cancel_claude,
+            claude::claude_sign_in
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hunkpad");

@@ -35,6 +35,40 @@ import { PatchFile, parsePatch, untrackedPatch } from "./overview";
 import { ReviewComment, loadComments, locate, newCommentId, saveComments } from "./comments";
 import { ExportComment, ExportFile, blocksPatch, fenceFor, splitPatch, statusWord, toMarkdown } from "./export";
 import {
+  COMMIT_SCHEMA,
+  COMMIT_SYSTEM,
+  CONFLICT_SCHEMA,
+  CONFLICT_SYSTEM,
+  ClaudeCancelledError,
+  ClaudeSignInError,
+  EXPLAIN_SYSTEM,
+  MAX_PROMPT_BYTES,
+  ORGANIZE_SCHEMA,
+  ORGANIZE_SYSTEM,
+  PR_SYSTEM,
+  PlanBlock,
+  REVIEW_SCHEMA,
+  REVIEW_SYSTEM,
+  TEXT_SCHEMA,
+  claudeSignIn,
+  claudeVersion,
+  commitPrompt,
+  conflictPrompt,
+  explainPrompt,
+  findSecrets,
+  hasConflictMarkers,
+  isSecretPath,
+  organizePrompt,
+  parseCommitMessage,
+  parseFindings,
+  parseGroupPlan,
+  parseResolution,
+  parseText,
+  prPrompt,
+  reviewPrompt,
+  runClaude,
+} from "./claude";
+import {
   DATA_DIR,
   flushAll,
   hasRepoData,
@@ -1452,6 +1486,553 @@ function copyComments() {
 $("copy-btn").addEventListener("click", copyCurrentView);
 $("copy-comments").addEventListener("click", copyComments);
 
+// ---- Claude (claude.ts): optional, through the user's own `claude` CLI ----------
+//
+// Off until the user turns it on. Every request shows what will be sent (unless
+// the user said not to ask), never includes Kept local or secret-looking files,
+// and is refused when the text looks like it holds a key. Claude only answers:
+// its groups, messages, comments and conflict resolutions are applied here,
+// after the user accepts them, through the usual Git flow.
+
+let claudeOn = loadFlag("claude", false);
+let claudeAsk = loadFlag("claudeAsk", true);
+let claudeModel = settings.getItem("claudeModel") ?? "";
+
+const claudeDialog = $<HTMLDialogElement>("claude-dialog");
+let claudeAnswer: ((choice: "ok" | "alt" | "cancel") => void) | null = null;
+
+function claudeMode(mode: "send" | "waiting" | "result", opts: { ok?: string; alt?: string; cancel?: string } = {}) {
+  claudeDialog.classList.remove("send", "waiting", "result");
+  claudeDialog.classList.add(mode);
+  claudeDialog.classList.toggle("has-alt", !!opts.alt);
+  $("claude-ok").textContent = opts.ok ?? "OK";
+  $("claude-alt").textContent = opts.alt ?? "";
+  $("claude-cancel").textContent = opts.cancel ?? "Cancel";
+  if (!claudeDialog.open) claudeDialog.showModal();
+}
+
+function claudeChoice(): Promise<"ok" | "alt" | "cancel"> {
+  return new Promise((resolve) => (claudeAnswer = resolve));
+}
+
+function answerClaude(choice: "ok" | "alt" | "cancel") {
+  const fn = claudeAnswer;
+  claudeAnswer = null;
+  fn?.(choice);
+}
+
+$("claude-ok").addEventListener("click", () => answerClaude("ok"));
+$("claude-alt").addEventListener("click", () => answerClaude("alt"));
+$("claude-cancel").addEventListener("click", () => answerClaude("cancel"));
+claudeDialog.addEventListener("cancel", (e) => {
+  e.preventDefault();
+  answerClaude("cancel");
+});
+
+/**
+ * Files whose text looks like it holds a key or token. Test data and examples
+ * can look like that too, so the user decides: leave those files out (the
+ * paths returned), send anyway (none returned), or cancel (null).
+ */
+async function screenSecrets(parts: { path: string; text: string }[]): Promise<Set<string> | null> {
+  const hits = new Map<string, Set<string>>();
+  for (const p of parts) {
+    for (const kind of findSecrets(p.text)) hits.set(p.path, (hits.get(p.path) ?? new Set()).add(kind));
+  }
+  if (!hits.size) return new Set();
+  const choice = await showClaudeResult(
+    "These changes may contain secrets",
+    [
+      h("p", {}, "Some added lines look like a key or token. Test data and examples can look like that too: check before sending."),
+      h("ul", {}, ...[...hits].map(([path, kinds]) => h("li", {}, h("code", {}, path), ` · ${[...kinds].join(", ")}`))),
+      h("p", { class: "small muted" }, "To never send a file, right-click it → Keep local."),
+    ],
+    { ok: `Leave ${hits.size === 1 ? "it" : "them"} out`, alt: "Send anyway", cancel: "Cancel" },
+  );
+  claudeDialog.close();
+  if (choice === "cancel") return null;
+  return choice === "ok" ? new Set(hits.keys()) : new Set();
+}
+
+/**
+ * Files Claude may see: never Hunkpad's folder, Kept local or secret-looking
+ * files; files that seem to hold a key only if the user says so. Null = cancelled.
+ */
+async function claudeFiles(files: ExportFile[]): Promise<{ send: ExportFile[]; skipped: string[] } | null> {
+  const skipped: string[] = [];
+  const allowed = files.filter((f) => {
+    const bad = isSecretPath(f.path) || isKept(f.path);
+    if (bad) skipped.push(f.path);
+    return !bad;
+  });
+  const leaveOut = await screenSecrets(allowed.map((f) => ({ path: f.path, text: f.patch })));
+  if (!leaveOut) return null;
+  skipped.push(...leaveOut);
+  return { send: allowed.filter((f) => !leaveOut.has(f.path)), skipped };
+}
+
+/** Markdown of changes for a request (diffs, statuses, open comments). */
+async function changesMarkdown(scope: string, files: ExportFile[], intro?: string): Promise<string> {
+  const byPath = await commentsByPath(files.map((f) => f.path));
+  for (const f of files) f.comments = (byPath.get(f.path) ?? []).filter((c) => c.status === "open");
+  return toMarkdown({ title: `Changes in ${projectName(repo!.root)}`, meta: repoMeta(scope), intro, files });
+}
+
+/**
+ * Sends one request: checks it, shows it (unless asked not to), waits with a
+ * Cancel button, and returns Claude's answer, or null when cancelled or refused.
+ * The dialog stays open (waiting) for the caller to show the result.
+ */
+async function askClaude(req: {
+  title: string;
+  summary: string;
+  files: string[];
+  skipped?: string[];
+  prompt: string;
+  system: string;
+  schema: object;
+}): Promise<unknown | null> {
+  if (!repo) return null;
+  const bytes = new TextEncoder().encode(req.prompt).length;
+  if (bytes > MAX_PROMPT_BYTES) {
+    await message(
+      `This is too much to send at once (${(bytes / 1024).toFixed(0)} KB). Use a group, or stage fewer files, and try again.`,
+      { title: "Hunkpad", kind: "warning" },
+    );
+    return null;
+  }
+  $("claude-title").textContent = req.title;
+  $("claude-summary").textContent = `${req.summary} · ${(bytes / 1024).toFixed(1)} KB${claudeModel ? ` · model ${claudeModel}` : ""}`;
+  $("claude-files").replaceChildren(
+    ...req.files.map((p) => h("li", {}, p)),
+    ...(req.skipped ?? []).map((p) => h("li", { class: "skipped", title: "Not sent: kept local or looks like a secret" }, p)),
+  );
+  $("claude-payload").textContent = req.prompt;
+  $("claude-result").replaceChildren();
+  const noAsk = $<HTMLInputElement>("claude-noask");
+  noAsk.checked = false;
+  if (claudeAsk) {
+    claudeMode("send", { ok: "Send" });
+    if ((await claudeChoice()) !== "ok") return void claudeDialog.close();
+    if (noAsk.checked) {
+      claudeAsk = false;
+      saveFlag("claudeAsk", false);
+    }
+  }
+  $("claude-wait-text").textContent = `${req.title.replace(/\?$/, "")}: waiting for Claude…`;
+  claudeMode("waiting", { cancel: "Cancel" });
+  const run = runClaude({ cwd: repo.root, system: req.system, prompt: req.prompt, schema: req.schema, model: claudeModel });
+  const t0 = performance.now();
+  const cancelled = claudeChoice().then((c) => {
+    if (c === "cancel") run.cancel();
+  });
+  try {
+    const answer = await run.result;
+    setStatus(`Claude answered in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+    return answer;
+  } catch (e) {
+    claudeDialog.close();
+    if (e instanceof ClaudeCancelledError) {
+      setStatus("Claude: cancelled");
+      return null;
+    }
+    throw e;
+  } finally {
+    answerClaude("ok"); // settles the pending Cancel wait
+    await cancelled;
+  }
+}
+
+/** Shows a result; resolves with the button chosen ("cancel" = Close). */
+function showClaudeResult(title: string, content: HTMLElement[], buttons: { ok: string; alt?: string; cancel?: string }) {
+  $("claude-title").textContent = title;
+  $("claude-summary").textContent = "";
+  $("claude-result").replaceChildren(...content);
+  claudeMode("result", { ok: buttons.ok, alt: buttons.alt, cancel: buttons.cancel ?? "Close" });
+  return claudeChoice();
+}
+
+function markdownBlock(text: string): HTMLElement {
+  const el = h("div", { class: "markdown-body" });
+  el.innerHTML = markdownToHtml(text);
+  return el;
+}
+
+/** Runs a Claude action, reporting failures in a dialog (with the CLI's own words). */
+function claudeAction(fn: () => Promise<unknown>) {
+  if (!repo) return;
+  if (!claudeOn) return void enableClaude();
+  fn().catch(async (e) => {
+    if (claudeDialog.open) claudeDialog.close();
+    setStatus(`Claude failed: ${errorText(e)}`, true);
+    if (e instanceof ClaudeSignInError) {
+      const go = await ask(`${errorText(e)}\n\nOpen a terminal to sign in? Then try again.`, {
+        title: "Claude",
+        kind: "warning",
+        okLabel: "Sign in…",
+        cancelLabel: "Close",
+      });
+      if (!go || !repo) return;
+      await claudeSignIn(repo.root).catch(showError);
+      setStatus("Finish signing in in the terminal window, then try again");
+      return;
+    }
+    await message(errorText(e), { title: "Claude", kind: "error" });
+  });
+}
+
+async function enableClaude() {
+  const version = await claudeVersion().catch(() => null);
+  if (!version) {
+    await message(
+      "Hunkpad's Claude features use the Claude Code command line (claude), which was not found.\n\n" +
+        "Install it from claude.com/claude-code, run `claude` once in a terminal to sign in, then try again.",
+      { title: "Claude", kind: "info" },
+    );
+    return;
+  }
+  const ok = await ask(
+    `Turn on Claude features? (claude ${version.replace(/\s*\(.*\)$/, "")})\n\n` +
+      "Hunkpad will send the diffs you choose to Claude through your own claude command line and its login. " +
+      "You see what will be sent before each request. Kept local and secret-looking files are never sent.",
+    { title: "Claude", okLabel: "Turn on" },
+  );
+  if (!ok) return;
+  setClaudeOn(true);
+}
+
+function setClaudeOn(on: boolean) {
+  claudeOn = on;
+  saveFlag("claude", on);
+  claudeMsgTitle();
+  setStatus(on ? "Claude features on: ✨ in the commit box, ✨ on Unstaged, and the ⋯ menu" : "Claude features off");
+  if (status) renderChanges();
+}
+
+async function setClaudeModel() {
+  const value = await promptInput("Claude model: alias or name (empty = the claude CLI's default), e.g. opus, sonnet, haiku", claudeModel);
+  if (value === null && !claudeModel) return;
+  claudeModel = value ?? "";
+  settings.setItem("claudeModel", claudeModel);
+  setStatus(claudeModel ? `Claude model: ${claudeModel}` : "Claude model: the CLI's default");
+}
+
+// 1. Commit message: for the staged changes, else the unstaged ones (not Kept local).
+function draftCommitMessage() {
+  claudeAction(async () => {
+    const staged = stagedNow();
+    const files = staged.length ? await stagedExport(staged) : await unstagedExport(unstagedNow());
+    if (!files.length) return setStatus("Nothing to describe: no changes", true);
+    await draftMessageFor(staged.length ? "Staged changes" : "Unstaged changes", files, (msg) => {
+      commitMsg.value = msg;
+      commitMsg.focus();
+    });
+  });
+}
+
+/** Drafts a message for these changes and hands it to `use` (after the user accepts it). */
+async function draftMessageFor(scope: string, all: ExportFile[], use: (message: string) => void) {
+  const picked = await claudeFiles(all);
+  if (!picked) return;
+  const { send, skipped } = picked;
+  if (!send.length) return setStatus("Nothing to send: only kept-local or secret-looking files changed", true);
+  const r = repo!;
+  const prompt = commitPrompt(await changesMarkdown(scope, send), await r.recentSubjects());
+  const answer = await askClaude({
+    title: "Draft a commit message with Claude?",
+    summary: `${scope}: ${send.length} file(s)`,
+    files: send.map((f) => f.path),
+    skipped,
+    prompt,
+    system: COMMIT_SYSTEM,
+    schema: COMMIT_SCHEMA,
+  });
+  if (answer === null) return;
+  const msg = parseCommitMessage(answer);
+  const box = h("textarea", { rows: 8 }) as HTMLTextAreaElement;
+  box.value = msg;
+  const choice = await showClaudeResult("Commit message from Claude", [box], { ok: "Use this message", cancel: "Discard" });
+  claudeDialog.close();
+  if (choice === "ok" && box.value.trim()) use(box.value.trim());
+}
+
+function draftGroupMessage(g: ChangeGroup) {
+  claudeAction(async () => {
+    const files = unstagedNow().filter((f) => blocksOf(f.path, g.id).length);
+    if (!files.length) return setStatus(`“${g.name}” has no changes`, true);
+    await draftMessageFor(`Group “${g.name}”`, await groupExport(g.id, files, g.name), (msg) => {
+      updateGroups((groups) => groups.map((x) => (x.id === g.id ? { ...x, message: msg } : x)));
+      setStatus(`Message saved for “${g.name}”: Commit this group to use it`);
+    });
+  });
+}
+
+// 2. Organize: Claude splits the change blocks (the ungrouped ones, when groups exist) into groups.
+async function blocksToOrganize(r: Repo): Promise<Hunk[]> {
+  const files = unstagedNow().filter((f) => !f.conflict && !isSecretPath(f.path));
+  const wanted = new Set(files.map((f) => f.path));
+  if (loadGroups(r.root).length) {
+    return [...hunkMap.entries()].filter(([p]) => wanted.has(p)).flatMap(([, list]) => list.filter((x) => x.group === null).map((x) => x.hunk));
+  }
+  const parsed = parseDiffU0(await r.diffU0()).filter((hk) => wanted.has(hk.path));
+  for (const f of files) if (f.unstaged === "U") parsed.push(wholeFileHunk(f.path, "untracked"));
+  return parsed;
+}
+
+async function blockText(r: Repo, hk: Hunk): Promise<string> {
+  if (hk.whole === "binary") return "(binary file changed)";
+  if (hk.whole === "untracked") {
+    const patch = splitPatch(await r.untrackedPatch(hk.path))[0]?.text ?? "";
+    return `(new file)\n${patch.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).join("\n")}`;
+  }
+  return [
+    `@@ -${hk.oldStart},${hk.oldCount} +${hk.newStart},${hk.newCount} @@`,
+    ...hk.removed.map((l) => `-${l}`),
+    ...hk.added.map((l) => `+${l}`),
+  ].join("\n");
+}
+
+function organizeWithClaude() {
+  claudeAction(async () => {
+    const r = repo!;
+    if (status?.operation) return setStatus(`Finish or abort the ${status.operation} first`, true);
+    const found = await blocksToOrganize(r);
+    const texts = await Promise.all(found.map((hk) => blockText(r, hk)));
+    const leaveOut = await screenSecrets(found.map((hk, i) => ({ path: hk.path, text: texts[i] })));
+    if (!leaveOut) return;
+    const keep = found.map((hk) => !leaveOut.has(hk.path));
+    const hunks = found.filter((_, i) => keep[i]);
+    if (hunks.length < 2) return setStatus("Nothing to organize: fewer than two ungrouped changes", true);
+    const blocks: PlanBlock[] = texts.filter((_, i) => keep[i]).map((text, i) => ({ id: `b${i + 1}`, path: hunks[i].path, text }));
+    const skipped = [...unstagedNow().filter((f) => isSecretPath(f.path)).map((f) => f.path), ...leaveOut];
+    const answer = await askClaude({
+      title: "Organize changes into groups with Claude?",
+      summary: `${blocks.length} change blocks in ${new Set(blocks.map((b) => b.path)).size} file(s)`,
+      files: [...new Set(blocks.map((b) => b.path))],
+      skipped,
+      prompt: organizePrompt(blocks, await r.recentSubjects()),
+      system: ORGANIZE_SYSTEM,
+      schema: ORGANIZE_SCHEMA,
+    });
+    if (answer === null) return;
+    const plan = parseGroupPlan(answer, blocks.map((b) => b.id));
+    const byId = new Map(blocks.map((b, i) => [b.id, hunks[i]]));
+
+    // Preview: each group with its message and files; untick to leave a group out.
+    const picks = plan.groups.map(() => true);
+    const rows = plan.groups.map((g, i) => {
+      const box = h("input", { type: "checkbox", checked: true, onchange: () => (picks[i] = box.checked) }) as HTMLInputElement;
+      const files = [...new Set(g.blocks.map((id) => byId.get(id)!.path))];
+      return h(
+        "div",
+        { class: "plan-group" },
+        h("label", {}, box, `${g.name} · ${g.blocks.length} change(s)`),
+        h("div", { class: "plan-files" }, files.join(", ")),
+        g.message ? h("pre", {}, g.message) : null,
+      );
+    });
+    const note = plan.unplaced.length
+      ? h("p", { class: "small muted" }, `${plan.unplaced.length} change(s) not placed by Claude stay Ungrouped.`)
+      : null;
+    const choice = await showClaudeResult(
+      `Claude suggests ${plan.groups.length} group(s)`,
+      [...rows, note ?? h("span", {}), h("p", { class: "small muted" }, "Groups are local to this machine. You can still drag changes between them, rename them, or delete them.")],
+      { ok: "Create groups", cancel: "Discard" },
+    );
+    claudeDialog.close();
+    if (choice !== "ok") return;
+
+    const chosen = plan.groups.filter((_, i) => picks[i]);
+    if (!chosen.length) return;
+    const made = chosen.map((g) => ({ id: newUserId(), name: g.name, files: [] as string[], ...(g.message ? { message: g.message } : {}) }));
+    saveGroups(r.root, [...loadGroups(r.root), ...made]);
+    const groupOf = new Map<Hunk, string | null>(hunks.map((hk) => [hk, null]));
+    chosen.forEach((g, i) => g.blocks.forEach((id) => groupOf.set(byId.get(id)!, made[i].id)));
+    const state = loadHunkState(r.root);
+    const others = state.hunks.filter((a) => !hunks.some((hk) => sameHunk(a, hk)));
+    saveHunkState(r.root, { active: state.active, hunks: [...others, ...hunks.map((hk) => assignmentOf(hk, groupOf.get(hk) ?? null))] });
+    setStatus(`Created ${made.length} group(s) from Claude's suggestion`);
+    await refresh();
+  });
+}
+
+// 3. Review: Claude's findings become review comments (Comments tab).
+function reviewWithClaude() {
+  claudeAction(async () => {
+    const r = repo!;
+    const staged = await stagedExport(stagedNow());
+    const unstaged = await unstagedExport(unstagedNow().filter((f) => !f.conflict));
+    const picked = await claudeFiles([...staged, ...unstaged].filter((f) => f.patch));
+    if (!picked) return;
+    const { send, skipped } = picked;
+    if (!send.length) return setStatus("Nothing to review: no changes", true);
+    const answer = await askClaude({
+      title: "Review my changes with Claude?",
+      summary: `Staged and unstaged changes: ${new Set(send.map((f) => f.path)).size} file(s)`,
+      files: [...new Set(send.map((f) => f.path))],
+      skipped,
+      prompt: reviewPrompt(await changesMarkdown("Staged and unstaged changes", send)),
+      system: REVIEW_SYSTEM,
+      schema: REVIEW_SCHEMA,
+    });
+    if (answer === null) return;
+    const texts = new Map<string, string[]>();
+    for (const p of new Set(send.map((f) => f.path))) {
+      const text = await r.readWorktree(p).catch(() => null);
+      if (text !== null) texts.set(p, text.split(/\r?\n/));
+    }
+    const findings = parseFindings(answer, new Map([...texts].map(([p, lines]) => [p, lines.length])));
+    claudeDialog.close();
+    if (!findings.length) return setStatus("Claude's review: no problems found");
+    const list = loadComments(r.root);
+    const now = Date.now();
+    for (const f of findings) {
+      const anchor = texts.get(f.path)![f.line - 1]?.trim() ?? "";
+      list.push({ id: newCommentId(), path: f.path, line: f.line, anchor, text: `Claude: ${f.comment}`, created: now, resolved: false });
+    }
+    saveComments(r.root, list);
+    commentsChanged();
+    setStatus(`Claude's review: ${findings.length} comment(s) added (Comments tab)`);
+    await showTab("comments");
+  });
+}
+
+/** Text to copy (or use), in an editable box, with a Markdown preview. */
+async function showClaudeText(title: string, text: { title: string; body: string }, copyLabel: string) {
+  const full = `${text.title}\n\n${text.body}`;
+  const choice = await showClaudeResult(title, [h("h3", {}, text.title), markdownBlock(text.body)], {
+    ok: copyLabel,
+    alt: "Copy as Markdown",
+  });
+  claudeDialog.close();
+  if (choice === "ok") {
+    await navigator.clipboard.writeText(full);
+    setStatus("Copied");
+  } else if (choice === "alt") {
+    await navigator.clipboard.writeText(`# ${text.title}\n\n${text.body}`);
+    setStatus("Copied as Markdown");
+  }
+}
+
+// 4. Pull request description for the current branch against a base branch.
+function describeBranchWithClaude() {
+  claudeAction(async () => {
+    const r = repo!;
+    const s = status!;
+    if (!s.branch) return setStatus("Check out a branch first (HEAD is detached)", true);
+    const guess = compareRef ?? (await r.defaultRemoteBranch()) ?? s.upstream ?? "main";
+    const base = await promptInput(`Describe “${s.branch}” for a pull request into (base branch)`, guess);
+    if (!base) return;
+    if (!(await r.isCommit(base))) return setStatus(`“${base}” is not a branch, tag or commit`, true);
+    const commits = await r.commitsSince(base);
+    if (!commits.length) return setStatus(`“${s.branch}” has no commits that are not on ${base}`, true);
+    const files = splitPatch(await r.branchPatch(base)).map((c) => ({ path: c.path, status: `changed since ${base}`, patch: c.text, comments: [] }));
+    const picked = await claudeFiles(files);
+    if (!picked) return;
+    const { send, skipped } = picked;
+    const changes = toMarkdown({ title: `${s.branch} compared with ${base}`, meta: repoMeta(`Branch ${s.branch} since ${base}`), files: send });
+    const answer = await askClaude({
+      title: "Describe this branch for a pull request?",
+      summary: `${commits.length} commit(s), ${send.length} file(s) since ${base}`,
+      files: send.map((f) => f.path),
+      skipped,
+      prompt: prPrompt(base, s.branch, commits.join("\n"), changes),
+      system: PR_SYSTEM,
+      schema: TEXT_SCHEMA,
+    });
+    if (answer === null) return;
+    await showClaudeText(`Pull request: ${s.branch} → ${base}`, parseText(answer), "Copy title + description");
+  });
+}
+
+// 5. Explain a commit (History tab).
+function explainCommitWithClaude(c: Commit) {
+  claudeAction(async () => {
+    const r = repo!;
+    const { header, patch } = await r.commitPatch(c.sha);
+    const files = splitPatch(patch).map((ch) => ({ path: ch.path, status: "changed in this commit", patch: ch.text, comments: [] }));
+    const picked = await claudeFiles(files);
+    if (!picked) return;
+    const { send, skipped } = picked;
+    const changes = toMarkdown({
+      title: `Commit ${c.shortSha} in ${projectName(r.root)}`,
+      meta: [`Repository: ${projectName(r.root)}`],
+      intro: `${fenceFor(header)}\n${header}\n${fenceFor(header)}`,
+      files: send,
+    });
+    const answer = await askClaude({
+      title: `Explain commit ${c.shortSha} with Claude?`,
+      summary: `${send.length} file(s)`,
+      files: send.map((f) => f.path),
+      skipped,
+      prompt: explainPrompt(changes),
+      system: EXPLAIN_SYSTEM,
+      schema: TEXT_SCHEMA,
+    });
+    if (answer === null) return;
+    await showClaudeText(`Commit ${c.shortSha}`, parseText(answer), "Copy");
+  });
+}
+
+// 6. Merge conflicts: Claude proposes the resolved file; applied only when accepted.
+function resolveConflictWithClaude(f: FileChange) {
+  claudeAction(async () => {
+    const r = repo!;
+    if (isSecretPath(f.path)) return setStatus(`${f.path} looks like a secret file: not sent to Claude`, true);
+    const original = await r.readWorktree(f.path);
+    if (original === null) return setStatus(`${f.path} is not a text file in the work tree`, true);
+    if (!hasConflictMarkers(original)) return setStatus(`${f.path} has no conflict markers left`, true);
+    const leaveOut = await screenSecrets([{ path: f.path, text: original }]);
+    if (!leaveOut || leaveOut.size) return;
+    const answer = await askClaude({
+      title: `Resolve the conflicts in ${f.path} with Claude?`,
+      summary: `1 file${status?.operation ? ` · ${status.operation} in progress` : ""}`,
+      files: [f.path],
+      prompt: conflictPrompt(f.path, status?.operation ?? null, original),
+      system: CONFLICT_SYSTEM,
+      schema: CONFLICT_SCHEMA,
+    });
+    if (answer === null) return;
+    const { content, explanation } = parseResolution(answer, original);
+    const choice = await showClaudeResult(
+      `Suggested resolution for ${f.path}`,
+      [
+        markdownBlock(explanation || "_No explanation given._"),
+        h("details", {}, h("summary", { class: "small" }, "Show the resolved file"), h("pre", {}, content)),
+        h("p", { class: "small muted" }, "Applying writes the file only; it stays conflicted until you review the diff and Mark resolved (+)."),
+      ],
+      { ok: "Apply to file", cancel: "Discard" },
+    );
+    claudeDialog.close();
+    if (choice !== "ok") return;
+    await r.writeWorktree(f.path, content);
+    setStatus(`Claude's resolution written to ${f.path}: review it, then Mark resolved (+). To start over: git checkout -m -- ${f.path}`);
+    await refresh();
+    await showDiff({ kind: "worktree", path: f.path, conflict: true });
+  });
+}
+
+/** The ✨ in the commit box is always there; while Claude is off it offers to turn it on. */
+function claudeMsgTitle() {
+  $("claude-msg").title = claudeOn
+    ? "Draft the message with Claude, from the staged changes (or, with nothing staged, the unstaged ones)"
+    : "Draft the message with Claude (click to turn on the Claude features)";
+}
+claudeMsgTitle();
+$("claude-msg").addEventListener("click", draftCommitMessage);
+
+function claudeMenu(): MenuItem[] {
+  if (!claudeOn) return [{ label: "Claude features…", run: () => enableClaude().catch(showError) }];
+  return [
+    { label: "✨ Claude: organize changes into groups", run: organizeWithClaude },
+    { label: "✨ Claude: review my changes", run: reviewWithClaude },
+    { label: "✨ Claude: describe this branch for a pull request…", run: describeBranchWithClaude },
+    { label: `Claude: ${claudeAsk ? "✓ " : ""}ask before sending`, run: () => saveFlag("claudeAsk", (claudeAsk = !claudeAsk)) },
+    { label: `Claude model: ${claudeModel || "CLI default"}…`, run: () => setClaudeModel().catch(showError) },
+    { label: "Turn off Claude features", run: () => setClaudeOn(false) },
+  ];
+}
+
 // ---- overview of all changes ----------------------------------------------
 
 const OV_MAX_LINES = 300; // per file; the full diff is one click away
@@ -2408,6 +2989,7 @@ function renderChanges() {
         fileItem(f.path, "!", "conflict", { kind: "worktree", path: f.path, conflict: true }, [
           iconBtn("◀", "Accept current (ours)", () => acceptConflict(f, "ours")),
           iconBtn("▶", "Accept incoming (theirs)", () => acceptConflict(f, "theirs")),
+          ...(claudeOn ? [iconBtn("✨", "Suggest a resolution with Claude", () => resolveConflictWithClaude(f))] : []),
           iconBtn("+", "Mark resolved (stage)", () => act("Mark resolved", () => r.stage([f.path]))),
         ]),
       ),
@@ -2438,6 +3020,7 @@ function renderChanges() {
       unstaged.length, // kept-local files are counted under their own root
       "unstaged",
       iconBtn("⧉", "Copy diff + comments (Markdown, for an LLM)", copyUnstaged),
+      ...(claudeOn ? [iconBtn("✨", "Organize into groups with Claude", organizeWithClaude)] : []),
       iconBtn("⊞", "New group (becomes the active group)", () => newGroup()),
       iconBtn("↶", "Discard all unstaged changes", () => discard(unstaged)),
       iconBtn("+", "Stage all unstaged changes", () => act("Stage all", () => r.stage(pathsOf(unstaged)))),
@@ -2879,7 +3462,21 @@ async function commitGroup(g: ChangeGroup) {
   const files = groupFiles(g.id);
   if (!files.length) return setStatus(`“${g.name}” has no changes to commit`, true);
   const typed = commitMsg.value.trim();
-  const message = typed || (await promptInput(`Commit message for “${g.name}”`, g.name));
+  let message = typed;
+  if (!message && g.message) {
+    const use = await ask(`Commit “${g.name}” with this message?\n\n${g.message}`, {
+      title: "Hunkpad",
+      okLabel: "Commit",
+      cancelLabel: "Edit first",
+    });
+    if (!use) {
+      commitMsg.value = g.message;
+      commitMsg.focus();
+      return setStatus(`Edit the message, then choose Commit this group (✓) again`);
+    }
+    message = g.message;
+  }
+  message ||= (await promptInput(`Commit message for “${g.name}”`, g.name)) ?? "";
   if (!message) return;
   const unborn = !status.oid;
   await act(`Commit “${g.name}”`, async () => {
@@ -2920,6 +3517,7 @@ function groupHeadMenu(g: ChangeGroup, isActive: boolean): MenuItem[] {
       : { label: "Set as active (new changes go here)", run: () => setActiveGroup(g.id) },
     "-",
     { label: "Commit this group…", run: () => commitGroup(g) },
+    ...(claudeOn ? [{ label: "✨ Draft commit message with Claude", run: () => draftGroupMessage(g) }] : []),
     { label: "Copy diff + comments (for LLM)", run: () => copyGroup(g.id, g.name) },
     { label: "Stage this group", run: () => stageGroup(g.id) },
     { label: "Discard this group’s changes…", run: () => discardGroup(g.id, g.name) },
@@ -3327,6 +3925,7 @@ function commitMenu(c: Commit): MenuItem[] {
     },
     "-",
     { label: "Copy commit for LLM (message + diff)", run: () => copyCommit(c) },
+    ...(claudeOn ? [{ label: "✨ Explain with Claude", run: () => explainCommitWithClaude(c) }] : []),
     { label: "Copy SHA", run: () => navigator.clipboard.writeText(c.sha) },
   ];
 }
@@ -4694,6 +5293,8 @@ function moreMenu(): MenuItem[] {
         ]
       : []),
     { label: "Toggle output log", run: toggleOutput },
+    "-",
+    ...claudeMenu(),
   ];
 }
 

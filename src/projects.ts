@@ -199,6 +199,8 @@ export interface ChangeGroup {
   /** Repo-relative paths; a file is in at most one group. */
   files: string[];
   collapsed?: boolean;
+  /** Suggested commit message (e.g. from Claude), offered when the group is committed. */
+  message?: string;
 }
 
 const copy = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;

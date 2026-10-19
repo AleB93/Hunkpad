@@ -55,6 +55,23 @@ comments in one Markdown file, ready to paste into a chat.
 
 <p align="center"><img src="docs/media/comments.gif" alt="Adding a review comment and opening the Comments tab" width="900"></p>
 
+### Optional: let Claude help (off by default)
+
+With the [Claude Code](https://claude.com/claude-code) command line installed
+and signed in, turn on **⋯ → Claude features…**. Hunkpad runs your own
+`claude` (no key or account in Hunkpad) to:
+
+- **✨ draft a commit message** (the ✨ in the message box) from the staged changes, or a group's changes;
+- **✨ Organize** unstaged changes into groups, each with a commit message;
+- **review** your changes, adding its findings as review comments;
+- **describe a branch** for a pull request, or **explain** a commit (History);
+- **suggest a resolution** for a merge conflict, written only when you accept it.
+
+Each request shows exactly what will be sent first. Claude gets no tools: it
+only reads that text and answers, and every Git command still goes through
+Hunkpad. Kept local and secret-looking files (`.env`, keys, credentials) are
+never sent, and a request is refused if the text looks like it holds a token.
+
 ### And the rest of a daily Git client
 
 | | |
@@ -210,8 +227,9 @@ Tools, command `hunkpad.exe`, arguments `$(SolutionDir)`. On macOS:
 ## Privacy and where data is stored
 
 Hunkpad has no telemetry, no accounts and no update checks. The only network
-traffic is what Git itself does (fetch, pull, push, clone) and opening the Git
-download page if you click it.
+traffic is what Git itself does (fetch, pull, push, clone), opening the Git
+download page if you click it, and, only if you turn the Claude features on,
+the requests you send through your own `claude` command line.
 
 - **Per repository**: `<repo>/.hunkpad/state.json` holds the tab colour,
   favourite branches/tags, change groups, Kept local list, scripts and review

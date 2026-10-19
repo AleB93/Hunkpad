@@ -6,6 +6,14 @@ All notable changes to Hunkpad are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Optional Claude features (off by default; ⋯ → Claude features…), run through
+  the user's own Claude Code CLI: draft commit messages, organize changes into
+  groups, review changes as comments, describe a branch for a pull request,
+  explain a commit, and suggest merge-conflict resolutions. Every request is
+  shown before it is sent; Kept local and secret-looking files are never sent.
+
 ## [0.2.0] - 2026-10-16
 
 ### Changed

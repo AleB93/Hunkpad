@@ -123,6 +123,10 @@ aside {
   padding: 4px 6px;
 }
 .commit-box .primary { flex: 1; }
+.commit-msg-wrap { position: relative; display: flex; }
+.commit-msg-wrap textarea { padding-right: 28px; }
+#claude-msg { position: absolute; top: 3px; right: 3px; opacity: 0.7; }
+#claude-msg:hover { opacity: 1; }
 
 .section-head {
   display: flex;
@@ -779,3 +783,45 @@ body:not(.has-repo) #scriptbar { display: none; }
 .markdown hr { height: 0; margin: 24px 0; border: 0; border-top: 2px solid var(--border); }
 .markdown img { max-width: 100%; }
 .markdown .md-remote-img { font-size: 12px; }
+
+/* ---- Claude (claude.ts) ---- */
+#claude-dialog { width: 640px; }
+#claude-files { margin: 0; padding-left: 18px; max-height: 140px; overflow: auto; }
+#claude-files .skipped { color: var(--muted); text-decoration: line-through; }
+#claude-payload,
+.claude-result pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: var(--bg-side);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: 12px Consolas, "Cascadia Mono", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+}
+.claude-result { max-height: 60vh; overflow: auto; line-height: 1.5; }
+.claude-result h1, .claude-result h2, .claude-result h3 { font-size: 14px; margin: 10px 0 4px; }
+.claude-result textarea { width: 100%; box-sizing: border-box; font: inherit; }
+.claude-result .plan-group { border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; margin-bottom: 6px; }
+.claude-result .plan-group label { display: flex; gap: 6px; align-items: center; font-weight: 600; }
+.claude-result .plan-group pre { max-height: 90px; }
+.claude-result .plan-files { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: claude-spin 0.8s linear infinite;
+  vertical-align: -1px;
+}
+@keyframes claude-spin { to { transform: rotate(360deg); } }
+/* Which parts each mode shows. */
+#claude-dialog:not(.send) .claude-send,
+#claude-dialog:not(.waiting) .claude-waiting,
+#claude-dialog:not(.result) .claude-result,
+#claude-dialog.waiting #claude-ok,
+#claude-dialog:not(.has-alt) #claude-alt { display: none; }

@@ -534,6 +534,28 @@ export class Repo {
     }
   }
 
+  /** Subjects of the latest commits (newest first), e.g. to match the message style. */
+  async recentSubjects(limit = 12): Promise<string[]> {
+    return (await this.read(["log", "--format=%s", "-n", String(limit)], true)).split("\n").filter(Boolean);
+  }
+
+  /** Commits on HEAD that are not on `base`, oldest first, as "abc1234 Subject". */
+  async commitsSince(base: string): Promise<string[]> {
+    const out = await this.read(["log", "--reverse", "--format=%h %s", `${base}..HEAD`], true);
+    return out.split("\n").filter(Boolean);
+  }
+
+  /** What HEAD changes since it left `base` (base...HEAD: from their merge base). */
+  branchPatch(base: string): Promise<string> {
+    return this.read(["diff", "-U3", "--no-color", "--no-ext-diff", `${base}...HEAD`], true);
+  }
+
+  /** The remote's default branch ("origin/main"), if known. */
+  async defaultRemoteBranch(): Promise<string | null> {
+    const out = await this.read(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], true);
+    return out.trim() || null;
+  }
+
   lastCommitMessage(): Promise<string> {
     return this.read(["log", "-1", "--format=%B"], true).then((s) => s.trim());
   }
