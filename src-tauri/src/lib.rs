@@ -3,6 +3,7 @@
 //! TypeScript frontend (src/git.ts).
 
 mod claude;
+mod mcp;
 mod platform;
 
 use std::{
@@ -561,6 +562,72 @@ fn read_package_json(path: String) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Whether Hunkpad runs inside a Windows job that kills its processes when it
+/// closes and does not let them leave it. `tauri dev` does that: cargo runs the
+/// app in such a job and closes it on every rebuild, which would also close
+/// every console started from here. Consoles then go through `launch_outside_job`.
+#[cfg(windows)]
+fn in_killing_job() -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn QueryInformationJobObject(job: *mut std::ffi::c_void, class: i32, info: *mut std::ffi::c_void, len: u32, ret: *mut u32) -> i32;
+    }
+    const EXTENDED_LIMIT_INFORMATION: i32 = 9;
+    const BREAKAWAY_OK: u32 = 0x0800;
+    const SILENT_BREAKAWAY_OK: u32 = 0x1000;
+    const KILL_ON_JOB_CLOSE: u32 = 0x2000;
+    // JOBOBJECT_EXTENDED_LIMIT_INFORMATION (144 bytes on x64); LimitFlags is the u32 at byte 16.
+    let mut info = [0u64; 18];
+    // SAFETY: a null job handle means "the calling process's job"; the buffer is large enough.
+    let ok = unsafe {
+        QueryInformationJobObject(
+            std::ptr::null_mut(),
+            EXTENDED_LIMIT_INFORMATION,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of_val(&info) as u32,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return false; // in no job
+    }
+    let flags = info[2] as u32;
+    flags & KILL_ON_JOB_CLOSE != 0 && flags & (BREAKAWAY_OK | SILENT_BREAKAWAY_OK) == 0
+}
+
+/// Runs `commands` (cmd.exe lines) in a new console in `cwd`, started by the
+/// desktop shell rather than by Hunkpad, so it is outside Hunkpad's job and
+/// stays open when Hunkpad closes: a small .cmd launcher, opened with explorer.exe.
+#[cfg(windows)]
+fn launch_outside_job(cwd: &str, commands: &str) -> Result<(), String> {
+    let dir = std::env::temp_dir().join("hunkpad-launch");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // cmd reads a batch file while it runs, so a launcher is only removed a day later.
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let day = Duration::from_secs(24 * 60 * 60);
+        for entry in entries.flatten() {
+            let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > day));
+            if old {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let launcher = dir.join(format!("run-{nanos}.cmd"));
+    // In a batch file % starts a variable: double it so paths keep theirs.
+    let body = format!("@echo off\r\ncd /d \"{cwd}\"\r\n{commands}\r\n").replace('%', "%%");
+    std::fs::write(&launcher, body).map_err(|e| format!("{}: {e}", launcher.display()))?;
+    // explorer.exe hands the file to the running desktop shell and exits.
+    Command::new("explorer.exe")
+        .arg(&launcher)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not start {}: {e}", launcher.display()))
+}
+
 /// Starts a user script in a new console (Windows) or terminal window, in `cwd`
 /// (the repository). The window stays open afterwards so its output can be read.
 /// With `npm`, `script` is a package.json and `npm run <npm>` runs in its folder.
@@ -584,6 +651,9 @@ fn launch_script(cwd: String, script: String, npm: Option<String>) -> Result<(),
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
         let quoted = |s: &str| format!("\"{s}\"");
+        if ext == "ps1" && in_killing_job() {
+            return launch_outside_job(&cwd, &format!("powershell.exe -NoExit -NoProfile -ExecutionPolicy Bypass -File {}", quoted(&script)));
+        }
         let mut cmd = if ext == "ps1" {
             let mut c = Command::new("powershell.exe");
             c.args(["-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &script]);
@@ -600,6 +670,9 @@ fn launch_script(cwd: String, script: String, npm: Option<String>) -> Result<(),
                 "js" | "mjs" => format!("node {}", quoted(&script)),
                 _ => quoted(&script), // .cmd, .bat, .exe and anything with a file association
             };
+            if in_killing_job() {
+                return launch_outside_job(&cwd, &format!("cmd /k \"{line}\""));
+            }
             let mut c = Command::new("cmd.exe");
             c.raw_arg(format!("/k \"{line}\""));
             c
@@ -629,6 +702,9 @@ fn launch_npm_script(package_json: &Path, name: &str) -> Result<(), String> {
         if name.contains('"') {
             return Err(format!("unsupported npm script name: {name}"));
         }
+        if in_killing_job() {
+            return launch_outside_job(&dir.to_string_lossy(), &format!("cmd /k \"npm run \"{name}\"\""));
+        }
         // Same outer quotes as launch_script: cmd strips them, the name keeps its own.
         Command::new("cmd.exe")
             .raw_arg(format!("/k \"npm run \"{name}\"\""))
@@ -654,6 +730,13 @@ fn open_terminal(cwd: String) -> Result<(), String> {
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        if in_killing_job() {
+            // Windows Terminal when it is there, else PowerShell in the launcher's own console.
+            return launch_outside_job(
+                &cwd,
+                "where wt.exe >nul 2>nul && (start \"\" wt.exe -d . & exit /b)\r\npowershell.exe -NoExit -NoLogo",
+            );
+        }
         // wt is an app execution alias: spawning fails when it is not installed.
         if Command::new("wt.exe").args(["-d", &cwd]).spawn().is_ok() {
             return Ok(());
@@ -746,6 +829,9 @@ pub fn run() {
             claude::claude_version,
             claude::run_claude,
             claude::cancel_claude,
+            mcp::mcp_start,
+            mcp::mcp_stop,
+            mcp::mcp_reply,
             claude::claude_sign_in
         ])
         .run(tauri::generate_context!())

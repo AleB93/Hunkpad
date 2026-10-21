@@ -28,6 +28,7 @@ import {
   setRunObserver,
   setLogger,
 } from "./git";
+import { McpHost, Outcome, ToolError, blockId, handleMcp, installArgs, mcpUrl, newToken, parseBlockId, removeArgs } from "./mcp";
 import { isMarkdown, isWebLink, markdownToHtml, resolveRepoPath, slug } from "./markdown";
 import { TextMatch, TextSearchOptions, grepArgs, matchRange, parseGrep, rankFiles } from "./search";
 import { LineChange, applyLineChanges, applyLineChangesWithRanges } from "./lineChanges";
@@ -283,7 +284,7 @@ let busy = 0;
 let currentAction: { label: string; approveAll: boolean } | null = null;
 
 /** Runs a Git action with status feedback, then refreshes everything. */
-async function act(label: string, fn: () => Promise<unknown>) {
+async function act(label: string, fn: () => Promise<unknown>): Promise<Outcome> {
   busy++;
   document.body.classList.add("busy");
   setStatus(`${label}…`);
@@ -293,15 +294,17 @@ async function act(label: string, fn: () => Promise<unknown>) {
     await fn();
     setStatus(`${label}: done`);
     finishSession("ok");
+    return "done";
   } catch (e) {
     if (e instanceof CancelledError) {
       setStatus(`${label}: cancelled, nothing more was run`);
       finishSession("cancelled");
-    } else {
-      showError(e);
-      setStatus(`${label} failed: ${errorText(e)}`, true);
-      finishSession("failed", e instanceof GitError ? signInHint(e) : errorText(e));
+      return "cancelled";
     }
+    showError(e);
+    setStatus(`${label} failed: ${errorText(e)}`, true);
+    finishSession("failed", e instanceof GitError ? signInHint(e) : errorText(e));
+    return "failed";
   } finally {
     currentAction = previous;
     if (--busy === 0) document.body.classList.remove("busy");
@@ -3478,8 +3481,14 @@ async function commitGroup(g: ChangeGroup) {
   }
   message ||= (await promptInput(`Commit message for “${g.name}”`, g.name)) ?? "";
   if (!message) return;
-  const unborn = !status.oid;
-  await act(`Commit “${g.name}”`, async () => {
+  if ((await commitGroupNow(g, files, message)) === "done" && typed) commitMsg.value = "";
+}
+
+/** Commits exactly the group's blocks with `message` (a temporary index), then deletes the group. */
+async function commitGroupNow(g: ChangeGroup, files: [string, Hunk[]][], message: string): Promise<Outcome> {
+  const r = repo!;
+  const unborn = !status?.oid;
+  return act(`Commit “${g.name}”`, async () => {
     const entries: CommitEntry[] = [];
     for (const [path, blocks] of files) {
       const whole = blocks.length === allBlocksOf(path).length || blocks.some((b) => b.whole);
@@ -3492,14 +3501,13 @@ async function commitGroup(g: ChangeGroup) {
       }
     }
     await r.commitEntries(message, entries, unborn);
-    if (typed) commitMsg.value = "";
     deleteGroup(g);
   });
 }
 
-async function stageGroup(g: string | null) {
+async function stageGroup(g: string | null): Promise<Outcome> {
   const files = groupFiles(g);
-  await act("Stage group", () => stageBlocksBatch(repo!, files));
+  return act("Stage group", () => stageBlocksBatch(repo!, files));
 }
 
 async function discardGroup(g: string | null, name: string) {
@@ -5295,6 +5303,8 @@ function moreMenu(): MenuItem[] {
     { label: "Toggle output log", run: toggleOutput },
     "-",
     ...claudeMenu(),
+    "-",
+    ...mcpMenu(),
   ];
 }
 
@@ -5448,6 +5458,394 @@ $("git-missing-check").addEventListener("click", async () => {
   setStatus(`Found ${version}`);
   await startup(); // now open the tabs that could not be opened before
 });
+
+// ---- MCP server for Claude Code (mcp.ts, src-tauri/src/mcp.rs) ---------------
+//
+// Off by default. When on, Claude Code (once installed with `claude mcp add`)
+// can see what this window shows and use its features. Git commands it asks for
+// go through the usual confirmation dialog.
+
+const MCP_DEFAULT_PORT = 47821;
+let mcpOn = loadFlag("mcpServer", false);
+let mcpRunning = false;
+const mcpPort = () => Number(settings.getItem("mcpPort")) || MCP_DEFAULT_PORT;
+
+function mcpToken(): string {
+  let token = settings.getItem("mcpToken");
+  if (!token || token.length < 32) {
+    token = newToken();
+    settings.setItem("mcpToken", token);
+  }
+  return token;
+}
+
+const needRepo = (): Repo => {
+  if (!repo) throw new ToolError("No repository is open in Hunkpad.");
+  return repo;
+};
+
+const needGroup = (r: Repo, id: string): ChangeGroup => {
+  const g = loadGroups(r.root).find((x) => x.id === id);
+  if (!g) throw new ToolError(`No change group with id ${id}: list them with hunkpad_list_changes.`);
+  return g;
+};
+
+/** Every unstaged block (not Kept local or conflicted) with its group, also before any group exists. */
+async function mcpBlocks(r: Repo): Promise<{ hunk: Hunk; group: string | null }[]> {
+  if (loadGroups(r.root).length) return [...hunkMap.values()].flat();
+  const kept = keptPathSet();
+  const files = changedFiles().filter((f) => f.unstaged && !f.conflict && !kept.has(f.path));
+  const wanted = new Set(files.map((f) => f.path));
+  const parsed = parseDiffU0(await r.diffU0()).filter((hk) => wanted.has(hk.path));
+  for (const f of files) if (f.unstaged === "U") parsed.push(wholeFileHunk(f.path, "untracked"));
+  return parsed.map((hunk) => ({ hunk, group: null }));
+}
+
+const MCP_MAX_BLOCK_LINES = 80;
+
+function blockInfo(hk: Hunk, group: string | null, includeDiff: boolean) {
+  const range = (start: number, count: number) => (count ? `${start}-${start + count - 1}` : `after ${start}`);
+  const info: Record<string, unknown> = {
+    id: blockId(hk.path, hk.oldStart, hk.sig),
+    group,
+    ...(hk.whole ? { whole: hk.whole } : { oldLines: range(hk.oldStart, hk.oldCount), newLines: range(hk.newStart, hk.newCount) }),
+    added: hk.added.length,
+    removed: hk.removed.length,
+  };
+  if (includeDiff && !hk.whole) {
+    if (isSecretPath(hk.path)) info.diff = "(withheld: the file looks like it holds secrets)";
+    else {
+      const lines = [...hk.removed.map((l) => `-${l}`), ...hk.added.map((l) => `+${l}`)];
+      info.diff = lines.slice(0, MCP_MAX_BLOCK_LINES).join("\n") + (lines.length > MCP_MAX_BLOCK_LINES ? `\n… ${lines.length - MCP_MAX_BLOCK_LINES} more lines` : "");
+    }
+  }
+  return info;
+}
+
+const mcpHost: McpHost = {
+  view() {
+    const r = repo;
+    const ed = modifiedEditor;
+    const pos = target ? ed.getPosition() : null;
+    const sel = target ? ed.getSelection() : null;
+    const selected = sel && !sel.isEmpty() ? (ed.getModel()?.getValueInRange(sel) ?? "") : "";
+    return {
+      repo: r
+        ? {
+            root: r.root,
+            name: r.name,
+            branch: status?.branch ?? null,
+            upstream: status?.upstream ?? null,
+            ahead: status?.ahead ?? 0,
+            behind: status?.behind ?? 0,
+            inProgress: status?.operation ?? null,
+          }
+        : null,
+      openRepos: openTabs,
+      sideTab: activeTab,
+      compareWith: compareRef,
+      file: target
+        ? {
+            path: target.path,
+            view: diffLabel(target),
+            markdownPreview: mdPreviewOn && showsMarkdown(),
+            cursor: pos ? { line: pos.lineNumber, column: pos.column } : null,
+            selection: selected
+              ? { fromLine: sel!.startLineNumber, toLine: sel!.endLineNumber, text: selected.slice(0, 4000) }
+              : null,
+          }
+        : null,
+    };
+  },
+
+  async switchRepo(root) {
+    const tab = openTabs.find((t) => samePath(t, root.replace(/\\/g, "/")) || samePath(t, root));
+    if (!tab) throw new ToolError(`Not an open tab: ${root}. Open tabs: ${openTabs.join(", ") || "none"}`);
+    await openRepo(tab);
+  },
+
+  async changes(includeDiff) {
+    const r = needRepo();
+    await refresh();
+    const files = changedFiles();
+    const kept = keptPathSet();
+    const blocks = await mcpBlocks(r);
+    const byPath = new Map<string, ReturnType<typeof blockInfo>[]>();
+    for (const { hunk, group } of blocks) byPath.set(hunk.path, [...(byPath.get(hunk.path) ?? []), blockInfo(hunk, group, includeDiff)]);
+    const groups = loadGroups(r.root);
+    const active = loadHunkState(r.root).active;
+    return {
+      repo: r.root,
+      staged: files.filter((f) => f.staged).map((f) => ({ path: f.path, status: f.staged, ...(f.origPath ? { from: f.origPath } : {}) })),
+      unstaged: files
+        .filter((f) => f.unstaged && !f.conflict && !kept.has(f.path))
+        .map((f) => ({ path: f.path, status: f.unstaged === "U" ? "untracked" : f.unstaged, blocks: byPath.get(f.path) ?? [] })),
+      conflicts: files.filter((f) => f.conflict).map((f) => f.path),
+      keptLocal: [...kept],
+      groups: groups.map((g) => ({
+        id: g.id,
+        name: g.name,
+        active: g.id === active,
+        ...(g.message ? { message: g.message } : {}),
+        blocks: blocks.filter((b) => b.group === g.id).length,
+      })),
+      ungroupedBlocks: blocks.filter((b) => b.group === null).length,
+      note: "Kept local files are never committed; their changes are not listed as blocks.",
+    };
+  },
+
+  createGroup(name, message, makeActive) {
+    const r = needRepo();
+    const id = newUserId();
+    saveGroups(r.root, [...loadGroups(r.root), { id, name, files: [], ...(message ? { message } : {}) }]);
+    if (makeActive) saveHunkState(r.root, { ...loadHunkState(r.root), active: id });
+    refresh().catch(showError);
+    setStatus(`Claude created the group “${name}”`);
+    return id;
+  },
+
+  updateGroup(id, change) {
+    const r = needRepo();
+    needGroup(r, id);
+    updateGroups((groups) => groups.map((g) => (g.id === id ? { ...g, ...change } : g)));
+  },
+
+  deleteGroup(id) {
+    deleteGroup(needGroup(needRepo(), id));
+  },
+
+  setActiveGroup(id) {
+    const r = needRepo();
+    if (id !== null) needGroup(r, id);
+    setActiveGroup(id);
+  },
+
+  async assignBlocks(ids, groupId) {
+    const r = needRepo();
+    if (groupId !== null) needGroup(r, groupId);
+    await refresh();
+    const all = await mcpBlocks(r);
+    const moved: string[] = [];
+    const notFound: string[] = [];
+    const chosen = new Set<Hunk>();
+    for (const id of ids) {
+      const want = parseBlockId(id);
+      const same = want ? all.filter((b) => b.hunk.path === want.path && b.hunk.sig === want.sig) : [];
+      const hit = same.find((b) => b.hunk.oldStart === want!.oldStart) ?? same[0];
+      if (hit) {
+        chosen.add(hit.hunk);
+        moved.push(id);
+      } else notFound.push(id);
+    }
+    if (chosen.size) {
+      const state = loadHunkState(r.root);
+      const others = state.hunks.filter((a) => !all.some((b) => sameHunk(a, b.hunk)));
+      const next = all.map((b) => assignmentOf(b.hunk, chosen.has(b.hunk) ? groupId : b.group));
+      saveHunkState(r.root, { active: state.active, hunks: [...others, ...next] });
+      await refresh();
+    }
+    return { moved, notFound };
+  },
+
+  listComments(filter) {
+    const r = needRepo();
+    return loadComments(r.root)
+      .filter((c) => filter === "all" || (filter === "resolved") === c.resolved)
+      .map((c) => ({ id: c.id, path: c.path, line: c.line, lineText: c.anchor, text: c.text, resolved: c.resolved }));
+  },
+
+  async addComment(path, line, text) {
+    const r = needRepo();
+    if (!text) throw new ToolError("text is required");
+    const content = await r.readWorktree(path);
+    if (content === null) throw new ToolError(`No such file in the working tree: ${path}`);
+    const lines = content.split(/\r?\n/);
+    if (line > lines.length) throw new ToolError(`${path} has ${lines.length} lines`);
+    const id = newCommentId();
+    const list = loadComments(r.root);
+    list.push({ id, path, line, anchor: lines[line - 1].trim(), text, created: Date.now(), resolved: false });
+    saveComments(r.root, list);
+    commentsChanged();
+    setStatus(`Claude commented on ${path}:${line}`);
+    return id;
+  },
+
+  resolveComment(id, resolved) {
+    const r = needRepo();
+    if (!loadComments(r.root).some((c) => c.id === id)) throw new ToolError(`No comment with id ${id}`);
+    updateComment(id, (c) => (c.resolved = resolved));
+  },
+
+  async openFile(path, line) {
+    const r = needRepo();
+    if (!(await invoke<boolean>("is_file", { path: `${r.root}/${path}` }))) throw new ToolError(`No such file: ${path}`);
+    const conflict = !!status?.files.find((f) => f.path === path)?.conflict;
+    await showDiff({ kind: "worktree", path, conflict }, { wholeFile: true });
+    if (line) revealLine(line, "modified");
+  },
+
+  async stageGroup(id) {
+    const r = needRepo();
+    const g = needGroup(r, id);
+    await refresh();
+    if (!groupFiles(g.id).length) throw new ToolError(`“${g.name}” has no changes`);
+    return stageGroup(g.id);
+  },
+
+  async commitGroup(id, message) {
+    const r = needRepo();
+    const g = needGroup(r, id);
+    await refresh();
+    if (status?.operation) throw new ToolError(`A ${status.operation} is in progress: the user must finish or abort it first`);
+    const files = groupFiles(g.id);
+    if (!files.length) throw new ToolError(`“${g.name}” has no changes to commit`);
+    const text = message?.trim() || g.message?.trim();
+    if (!text) throw new ToolError("Give a commit message (the group has no suggested one)");
+    return commitGroupNow(g, files, text);
+  },
+};
+
+listen<{ id: number; method: string; params: unknown }>("mcp-request", async (e) => {
+  const { id, method, params } = e.payload;
+  const response = await handleMcp(mcpHost, method, params).catch((err) => ({
+    error: { code: -32603, message: errorText(err) },
+  }));
+  invoke("mcp_reply", { id, response }).catch(() => {});
+});
+
+async function startMcp(): Promise<boolean> {
+  try {
+    // A restart (e.g. the page reloads) stops the old listener first; its port can
+    // take a moment to be free again, so binding is retried briefly.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await invoke("mcp_start", { port: mcpPort(), token: mcpToken() });
+        break;
+      } catch (e) {
+        if (attempt === 8) throw e;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    mcpRunning = true;
+    return true;
+  } catch (e) {
+    mcpRunning = false;
+    setStatus(`MCP server: ${errorText(e)}`, true);
+    return false;
+  } finally {
+    renderMcpButton();
+  }
+}
+
+/** The Quick row's button: its dot shows whether the server runs; a click turns it on, or opens its menu. */
+function renderMcpButton() {
+  const btn = $("qa-mcp");
+  btn.classList.toggle("on", mcpOn && mcpRunning);
+  btn.classList.toggle("failed", mcpOn && !mcpRunning);
+  btn.title = !mcpOn
+    ? "Let Claude Code see and use Hunkpad (turns on a local MCP server)"
+    : mcpRunning
+      ? `Claude Code can use Hunkpad: ${mcpUrl(mcpPort())}. Click for options.`
+      : "The MCP server is on but not running. Click for options.";
+}
+
+$("qa-mcp").addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (!mcpOn) return void turnOnMcp().catch(showError);
+  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  showMenu(r.left, r.bottom, mcpMenu());
+});
+
+async function turnOnMcp() {
+  const ok = await ask(
+    "Let Claude Code see and use Hunkpad?\n\n" +
+      `Hunkpad will run a local MCP server on ${mcpUrl(mcpPort())} (this computer only, protected by a secret token). ` +
+      "Claude Code can then see the open repository, file, cursor and selection, changes, change groups and comments, " +
+      "organise groups, comment and open files. Git commands it asks for (stage or commit a group) are shown to you here first.\n\n" +
+      "Next, Hunkpad can add it to Claude Code (claude mcp add, for all your projects).",
+    { title: "Hunkpad MCP server", okLabel: "Turn on" },
+  );
+  if (!ok) return;
+  mcpOn = true;
+  saveFlag("mcpServer", true);
+  if (!(await startMcp())) return;
+  setStatus(`MCP server on: ${mcpUrl(mcpPort())}`);
+  await installMcp();
+}
+
+async function turnOffMcp() {
+  await invoke("mcp_stop").catch(showError);
+  mcpOn = mcpRunning = false;
+  saveFlag("mcpServer", false);
+  renderMcpButton();
+  setStatus("MCP server off (Claude Code keeps its entry until you remove it)");
+}
+
+/** `claude mcp add` for the user scope, replacing an older entry. */
+async function installMcp() {
+  const shown = installArgs(mcpPort(), "<token>").join(" ");
+  const ok = await ask(`Add Hunkpad to Claude Code, for all your projects?\n\nclaude ${shown}`, {
+    title: "Hunkpad MCP server",
+    okLabel: "Add",
+  });
+  if (!ok) return;
+  const cwd = repo?.root ?? ".";
+  try {
+    await invoke("run_claude", { cwd, args: removeArgs(), stdin: "", id: 0 }); // fine if it was not there
+    const out = await invoke<{ code: number; stdout: string; stderr: string }>("run_claude", {
+      cwd,
+      args: installArgs(mcpPort(), mcpToken()),
+      stdin: "",
+      id: 0,
+    });
+    if (out.code !== 0) throw new Error((out.stderr || out.stdout).trim() || `claude exited with code ${out.code}`);
+    await message(
+      "Added. In Claude Code, start a new session (or run /mcp) and Hunkpad's tools are there, e.g. " +
+        "“look at what I have open in Hunkpad” or “organise my changes into groups”.\n\n" +
+        "Hunkpad must be running for Claude to reach it.",
+      { title: "Hunkpad MCP server", kind: "info" },
+    );
+  } catch (e) {
+    const text = errorText(e);
+    await message(
+      text.includes("CLAUDE_NOT_FOUND")
+        ? "The claude command line was not found. Install Claude Code (claude.com/claude-code), then try again."
+        : `Could not add it: ${text}`,
+      { title: "Hunkpad MCP server", kind: "error" },
+    );
+  }
+}
+
+async function uninstallMcp() {
+  const out = await invoke<{ code: number; stdout: string; stderr: string }>("run_claude", {
+    cwd: repo?.root ?? ".",
+    args: removeArgs(),
+    stdin: "",
+    id: 0,
+  }).catch((e) => ({ code: 1, stdout: "", stderr: errorText(e) }));
+  setStatus(out.code === 0 ? "Removed Hunkpad from Claude Code" : `claude mcp remove: ${(out.stderr || out.stdout).trim()}`, out.code !== 0);
+}
+
+/** A new token: Claude Code's old entry stops working, so it is reinstalled. */
+async function newMcpToken() {
+  settings.setItem("mcpToken", newToken());
+  if (mcpOn) await startMcp();
+  await installMcp();
+}
+
+function mcpMenu(): MenuItem[] {
+  if (!mcpOn) return [{ label: "Claude Code can use Hunkpad (MCP)…", run: () => turnOnMcp().catch(showError) }];
+  return [
+    { label: `MCP server: ${mcpRunning ? `on, ${mcpUrl(mcpPort())}` : "not running (retry)"}`, run: () => startMcp().catch(showError) },
+    { label: "MCP: add to Claude Code…", run: () => installMcp().catch(showError) },
+    { label: "MCP: remove from Claude Code", run: () => uninstallMcp().catch(showError) },
+    { label: "MCP: new token (and re-add)…", run: () => newMcpToken().catch(showError) },
+    { label: "Turn off MCP server", run: () => turnOffMcp().catch(showError) },
+  ];
+}
+
+renderMcpButton();
+if (mcpOn) startMcp().catch(showError);
 
 // ---- startup --------------------------------------------------------------
 

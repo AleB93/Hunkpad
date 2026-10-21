@@ -72,6 +72,30 @@ only reads that text and answers, and every Git command still goes through
 Hunkpad. Kept local and secret-looking files (`.env`, keys, credentials) are
 never sent, and a request is refused if the text looks like it holds a token.
 
+### Optional: let Claude Code use Hunkpad (MCP)
+
+The other way round: while you work with Claude Code in a terminal or IDE, it
+can see what Hunkpad shows and use it. Turn on **⋯ → Claude Code can use
+Hunkpad (MCP)…**; Hunkpad starts a local MCP server and adds it to Claude Code
+for you (`claude mcp add --scope user`). Then ask Claude things like *"look at
+what I have open in Hunkpad"* or *"split my changes into groups"*.
+
+| Tool | Does |
+| --- | --- |
+| `hunkpad_get_view` | active repo, open file, cursor and selection, side tab |
+| `hunkpad_list_changes` | staged, unstaged blocks with their groups, Kept local, conflicts |
+| `hunkpad_create_group` · `update_group` · `delete_group` · `set_active_group` | manage change groups |
+| `hunkpad_assign_blocks` | move change blocks between groups |
+| `hunkpad_list_comments` · `add_comment` · `resolve_comment` | review comments |
+| `hunkpad_open_file` | show a file (at a line) in Hunkpad |
+| `hunkpad_stage_group` · `commit_group` | stage or commit one group, **after you approve the Git command in Hunkpad** |
+| `hunkpad_switch_repo` | switch to another open tab |
+
+The server listens on `127.0.0.1:47821` only and needs a secret token (stored
+in Hunkpad's settings and in Claude Code's config); requests from web pages
+are refused. Hunkpad must be running for Claude to reach it. **⋯ → MCP: new
+token** replaces the token and re-adds the entry.
+
 ### And the rest of a daily Git client
 
 | | |

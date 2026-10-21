@@ -605,6 +605,10 @@ dialog p { margin: 0; }
 #script-buttons button .play { color: var(--add); margin-right: 4px; }
 #add-script { padding: 1px 8px; color: var(--muted); }
 #quickbar button { flex: none; padding: 1px 9px; }
+/* MCP button: grey = off, green = Claude Code can connect, red = on but not running. */
+#qa-mcp .dot { display: inline-block; width: 7px; height: 7px; margin-right: 3px; border-radius: 50%; background: var(--muted); vertical-align: 1px; }
+#qa-mcp.on .dot { background: var(--add); }
+#qa-mcp.failed .dot { background: var(--del); }
 /* Same label width, so both rows' buttons line up. */
 #quickbar > .small, #scriptbar > .small { width: 42px; flex: none; }
 body:not(.has-repo) #quickbar,
