@@ -16,8 +16,9 @@
   color-scheme: light dark;
 }
 
+/* Themes: System (no data-theme: follows the OS), Light, Dark, Retro (⋯ top bar). */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme]) {
     --bg: #1e1e1e;
     --bg-side: #252526;
     --fg: #cccccc;
@@ -33,6 +34,42 @@
     --del: #f14c4c;
     --ren: #4fc1ff;
   }
+}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1e1e1e;
+  --bg-side: #252526;
+  --fg: #cccccc;
+  --muted: #8b8b8b;
+  --border: #333333;
+  --hover: #2a2d2e;
+  --selected: #04395e;
+  --accent: #0e639c;
+  --accent-fg: #ffffff;
+  --banner: #4b3b00;
+  --mod: #e2c08d;
+  --add: #73c991;
+  --del: #f14c4c;
+  --ren: #4fc1ff;
+}
+/* Retro: the PICO-8 palette of the logo, square corners, chunky shadows, CRT scanlines. */
+:root[data-theme="retro"] {
+  color-scheme: dark;
+  --bg: #1a1c2c;
+  --bg-side: #262b44;
+  --fg: #f4f4f4;
+  --muted: #94a3c7;
+  --border: #3e4a6e;
+  --hover: #333c57;
+  --selected: #5d275d;
+  --accent: #29adff;
+  --accent-fg: #1a1c2c;
+  --banner: #5f574f;
+  --mod: #ffa300;
+  --add: #00e436;
+  --del: #ff004d;
+  --ren: #29adff;
 }
 
 * { box-sizing: border-box; }
@@ -704,6 +741,17 @@ body:not(.has-repo) #scriptbar { display: none; }
 .comment-card .meta { font-size: 11px; white-space: nowrap; }
 .comment-card button { font-size: 11px; padding: 0 6px; }
 /* Comments tab */
+/* Comments tab head: filter + quick actions, kept on top while the list scrolls. */
+#comments-head { position: sticky; top: 0; z-index: 1; background: var(--bg-side); border-bottom: 1px solid var(--border); }
+#comments-head .filter-bar { position: static; padding-bottom: 4px; }
+#comment-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 0 10px 6px; }
+#comment-actions button { padding: 1px 8px; font-size: 12px; }
+#comment-actions button.danger:not(:disabled) { color: var(--del); }
+#comment-actions button.danger:not(:disabled):hover { background: var(--del); border-color: var(--del); color: #fff; }
+button:disabled { opacity: 0.45; cursor: default; }
+button:disabled:hover { background: var(--bg-side); }
+#panel-comments .section-head .icon { padding: 0 4px; min-width: 0; visibility: hidden; }
+#panel-comments .section-head:hover .icon { visibility: visible; }
 .comment-row { padding: 4px 6px 4px 26px; cursor: pointer; border-bottom: 1px solid var(--border); }
 .comment-row:hover { background: var(--hover); }
 .comment-row .top { display: flex; align-items: center; gap: 6px; }
@@ -829,3 +877,48 @@ body:not(.has-repo) #scriptbar { display: none; }
 #claude-dialog:not(.result) .claude-result,
 #claude-dialog.waiting #claude-ok,
 #claude-dialog:not(.has-alt) #claude-alt { display: none; }
+
+/* ---- top bar (app-wide: logo, projects, search, Claude Code, theme) ---- */
+#appbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--bg-side);
+  border-bottom: 1px solid var(--border);
+}
+#appbar > button { padding: 2px 9px; }
+#wordmark { font-weight: 600; letter-spacing: 0.02em; margin-right: 8px; }
+#theme-pick { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+#theme-select {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+/* ---- Retro theme extras ---- */
+[data-theme="retro"] body { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; font-size: 12.5px; }
+[data-theme="retro"] *,
+[data-theme="retro"] *::before,
+[data-theme="retro"] *::after { border-radius: 0 !important; }
+[data-theme="retro"] button { border-width: 1px; box-shadow: 2px 2px 0 #000; }
+[data-theme="retro"] button:active { transform: translate(1px, 1px); box-shadow: 1px 1px 0 #000; }
+[data-theme="retro"] button.icon,
+[data-theme="retro"] button.link,
+[data-theme="retro"] .repo-tab button,
+[data-theme="retro"] .seg button { box-shadow: none; }
+[data-theme="retro"] #wordmark { color: #ffec27; text-shadow: 2px 2px 0 #ff004d; text-transform: uppercase; }
+[data-theme="retro"] #appbar { border-bottom: 2px solid #ff004d; }
+[data-theme="retro"] ::selection { background: #ff77a8; color: #1a1c2c; }
+/* Faint CRT scanlines over the whole window (clicks go through). */
+[data-theme="retro"] body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  pointer-events: none;
+  background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0.14) 0 1px, transparent 1px 3px);
+}

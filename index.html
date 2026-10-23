@@ -7,8 +7,8 @@
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <!-- Row 1: Git users. Row 2: the active user's repositories. -->
-    <div id="userbar">
+    <!-- Top bar: app-wide things (not about one repository). -->
+    <div id="appbar">
       <!-- Animated version of app-icon.svg: lines "type" in, cursor blinks, a CRT scanline sweeps. -->
       <svg id="logo" viewBox="0 0 16 16" shape-rendering="crispEdges" role="img" aria-label="Hunkpad">
         <title>Hunkpad</title>
@@ -28,6 +28,23 @@
         <rect class="cursor" x="13" y="11" width="1" height="2" fill="#ffec27" />
         <rect class="scan" x="0" y="0" width="16" height="1" fill="#ffffff" />
       </svg>
+      <span id="wordmark">Hunkpad</span>
+      <button id="app-projects" title="Projects: open or switch repositories (Ctrl+R)">☰ Projects</button>
+      <button id="app-search" class="repo-only" title="Search files by name (Ctrl+P) or text (Ctrl+Shift+F)">🔍 Search</button>
+      <button id="qa-mcp" title="Let Claude Code see and use Hunkpad (MCP server)"><span class="dot"></span> Claude Code (MCP)</button>
+      <span class="spacer"></span>
+      <label id="theme-pick" class="small" title="Colour theme">
+        Theme
+        <select id="theme-select">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+          <option value="retro">Retro</option>
+        </select>
+      </label>
+    </div>
+    <!-- Row 2: Git users. Row 3: the active user's repositories. -->
+    <div id="userbar">
       <div id="user-tabs"></div>
       <button id="add-user" title="New Git user">+</button>
     </div>
@@ -40,7 +57,6 @@
       <span class="small muted">Quick</span>
       <button id="qa-terminal" title="Open a terminal in the repository folder">&gt;_ Terminal here</button>
       <button id="qa-copy-path" title="Copy the repository folder's path">⧉ Copy path</button>
-      <button id="qa-mcp" title="Let Claude Code see and use Hunkpad (MCP server)"><span class="dot"></span> Claude Code (MCP)</button>
     </div>
     <!-- The active repository's own scripts: each runs in a new console, in the repo folder. -->
     <div id="scriptbar" class="repo-only">
@@ -139,13 +155,22 @@
         </div>
         <div id="panel-stashes" class="panel hidden"></div>
         <div id="panel-comments" class="panel hidden">
-          <div class="filter-bar seg" id="comment-filter">
-            <button data-filter="open" class="active">Open</button>
-            <button data-filter="resolved">Resolved</button>
-            <button data-filter="outdated">Outdated</button>
-            <button data-filter="all">All</button>
-            <span class="spacer"></span>
-            <button id="copy-comments" title="Copy the comments shown, with their code lines, as Markdown">⧉ Copy</button>
+          <div id="comments-head">
+            <div class="filter-bar seg" id="comment-filter">
+              <button data-filter="open" class="active">Open</button>
+              <button data-filter="resolved">Resolved</button>
+              <button data-filter="outdated">Outdated</button>
+              <button data-filter="all">All</button>
+            </div>
+            <!-- Quick actions: each one acts on the comments the filter shows. -->
+            <div id="comment-actions">
+              <span id="comments-shown" class="small muted"></span>
+              <span class="spacer"></span>
+              <button id="comments-resolve-all" title="Resolve every open comment shown">✓ Resolve all</button>
+              <button id="comments-reopen-all" title="Reopen every resolved comment shown">↺ Reopen all</button>
+              <button id="copy-comments" title="Copy the comments shown, with their code lines, as Markdown">⧉ Copy</button>
+              <button id="comments-drop-all" class="danger" title="Delete every comment shown">🗑 Drop all</button>
+            </div>
           </div>
           <div id="comment-list"></div>
         </div>

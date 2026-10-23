@@ -653,7 +653,61 @@ gitDialog.addEventListener("close", () => {
 
 // ---- diff editor ----------------------------------------------------------
 
+// ---- themes (top bar): System follows the OS; Light, Dark and Retro are fixed ----
+
+type Theme = "system" | "light" | "dark" | "retro";
+const THEMES: Theme[] = ["system", "light", "dark", "retro"];
 const dark = window.matchMedia("(prefers-color-scheme: dark)");
+let theme: Theme = THEMES.find((t) => t === settings.getItem("theme")) ?? "system";
+
+// The code editor's Retro look: the same PICO-8 palette as the app.
+monaco.editor.defineTheme("hunkpad-retro", {
+  base: "vs-dark",
+  inherit: true,
+  rules: [
+    { token: "comment", foreground: "83769c", fontStyle: "italic" },
+    { token: "keyword", foreground: "ff77a8" },
+    { token: "string", foreground: "ffec27" },
+    { token: "number", foreground: "ffa300" },
+    { token: "type", foreground: "29adff" },
+    { token: "delimiter", foreground: "c2c3c7" },
+  ],
+  colors: {
+    "editor.background": "#1a1c2c",
+    "editor.foreground": "#f4f4f4",
+    "editorGutter.background": "#1a1c2c",
+    "editorLineNumber.foreground": "#5f574f",
+    "editorLineNumber.activeForeground": "#ffec27",
+    "editorCursor.foreground": "#ffec27",
+    "editor.lineHighlightBackground": "#262b44",
+    "editor.selectionBackground": "#5d275d",
+    "diffEditor.insertedTextBackground": "#00e43638",
+    "diffEditor.removedTextBackground": "#ff004d38",
+    "diffEditor.insertedLineBackground": "#00e4361c",
+    "diffEditor.removedLineBackground": "#ff004d1c",
+    "scrollbarSlider.background": "#3e4a6e99",
+  },
+});
+
+const editorTheme = () =>
+  theme === "retro" ? "hunkpad-retro" : theme === "dark" || (theme === "system" && dark.matches) ? "vs-dark" : "vs";
+
+function applyTheme(next: Theme) {
+  theme = next;
+  if (next === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.dataset.theme = next;
+  monaco.editor.setTheme(editorTheme());
+  const select = document.getElementById("theme-select") as HTMLSelectElement | null;
+  if (select) select.value = next;
+}
+applyTheme(theme);
+dark.addEventListener("change", () => theme === "system" && monaco.editor.setTheme(editorTheme()));
+$<HTMLSelectElement>("theme-select").addEventListener("change", (e) => {
+  const value = (e.target as HTMLSelectElement).value as Theme;
+  settings.setItem("theme", value);
+  applyTheme(value);
+});
+
 const originalModel = monaco.editor.createModel("", "plaintext");
 const modifiedModel = monaco.editor.createModel("", "plaintext");
 const diffEditor = monaco.editor.createDiffEditor($("diff"), {
@@ -666,10 +720,9 @@ const diffEditor = monaco.editor.createDiffEditor($("diff"), {
   hideUnchangedRegions: { enabled: true },
   // Room in the left margin for the comment icons (💬 / ＋).
   glyphMargin: true,
-  theme: dark.matches ? "vs-dark" : "vs",
+  theme: editorTheme(),
 });
 diffEditor.setModel({ original: originalModel, modified: modifiedModel });
-dark.addEventListener("change", (e) => monaco.editor.setTheme(e.matches ? "vs-dark" : "vs"));
 
 type DiffTarget =
   | { kind: "worktree"; path: string; conflict: boolean }
@@ -1129,6 +1182,59 @@ async function openComment(c: ReviewComment, line: number | null) {
   revealLine(line ?? c.line, "modified");
 }
 
+/** The comments the Comments tab shows now (after the filter): what its quick actions act on. */
+let commentsShown: ReviewComment[] = [];
+
+/** Resolves (or reopens) every comment in `list`. */
+function setCommentsResolved(list: ReviewComment[], resolved: boolean) {
+  const r = repo;
+  const ids = new Set(list.filter((c) => c.resolved !== resolved).map((c) => c.id));
+  if (!r || !ids.size) return;
+  const now = Date.now();
+  saveComments(
+    r.root,
+    loadComments(r.root).map((c) => (ids.has(c.id) ? { ...c, resolved, updated: now } : c)),
+  );
+  commentsChanged();
+  setStatus(`${resolved ? "Resolved" : "Reopened"} ${ids.size} comment${ids.size === 1 ? "" : "s"}`);
+}
+
+/** Deletes every comment in `list`, after asking. */
+async function dropComments(list: ReviewComment[], where: string) {
+  const r = repo;
+  if (!r || !list.length) return;
+  const n = list.length;
+  if (!(await confirmAction(`Delete ${n} comment${n === 1 ? "" : "s"} ${where}? This cannot be undone.`))) return;
+  const ids = new Set(list.map((c) => c.id));
+  saveComments(r.root, loadComments(r.root).filter((c) => !ids.has(c.id)));
+  commentsChanged();
+  setStatus(`Deleted ${n} comment${n === 1 ? "" : "s"}`);
+}
+
+const filterName = () => ({ open: "open", resolved: "resolved", outdated: "outdated", all: "" })[commentFilter];
+
+function renderCommentActions() {
+  const shown = commentsShown;
+  const open = shown.filter((c) => !c.resolved).length;
+  const resolved = shown.length - open;
+  const name = filterName();
+  $("comments-shown").textContent = `${shown.length} ${name ? `${name} ` : ""}comment${shown.length === 1 ? "" : "s"}`;
+  $<HTMLButtonElement>("comments-resolve-all").disabled = !open;
+  $<HTMLButtonElement>("comments-reopen-all").disabled = !resolved;
+  $<HTMLButtonElement>("copy-comments").disabled = !shown.length;
+  $<HTMLButtonElement>("comments-drop-all").disabled = !shown.length;
+  // Resolve / Reopen only where they can do something.
+  $("comments-resolve-all").classList.toggle("hidden", commentFilter === "resolved");
+  $("comments-reopen-all").classList.toggle("hidden", commentFilter === "open" || commentFilter === "outdated");
+}
+
+$("comments-resolve-all").addEventListener("click", () => setCommentsResolved(commentsShown, true));
+$("comments-reopen-all").addEventListener("click", () => setCommentsResolved(commentsShown, false));
+$("comments-drop-all").addEventListener("click", () => {
+  const name = filterName();
+  dropComments(commentsShown, name ? `(all ${name} comments shown)` : "(all comments in this repository)").catch(showError);
+});
+
 async function renderCommentsPanel() {
   const r = repo;
   if (!r) return;
@@ -1158,9 +1264,21 @@ async function renderCommentsPanel() {
     byPath.set(x.c.path, [...(byPath.get(x.c.path) ?? []), x]);
   }
 
+  commentsShown = show.map((x) => x.c);
+  renderCommentActions();
+
   const rows: HTMLElement[] = [];
   for (const [path, items] of byPath) {
-    rows.push(sectionHead(path, items.length));
+    const fileComments = items.map((x) => x.c);
+    const openHere = fileComments.filter((c) => !c.resolved);
+    rows.push(
+      sectionHead(
+        path,
+        items.length,
+        ...(openHere.length ? [iconBtn("✓", "Resolve this file's comments shown", () => setCommentsResolved(openHere, true))] : []),
+        iconBtn("🗑", "Delete this file's comments shown", () => dropComments(fileComments, `in ${path}`).catch(showError)),
+      ),
+    );
     for (const { c, line } of items) {
       const outdated = line === null;
       rows.push(
@@ -5321,6 +5439,8 @@ function toggleLayout() {
 }
 
 $("add-tab").addEventListener("click", showProjects);
+$("app-projects").addEventListener("click", showProjects);
+$("app-search").addEventListener("click", () => showSearch("files"));
 $("branch-btn").addEventListener("click", () =>
   showTab("branches")
     .then(() => branchFilter.select())
