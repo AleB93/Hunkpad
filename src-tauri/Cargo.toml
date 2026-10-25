@@ -1,6 +1,6 @@
 [package]
 name = "hunkpad"
-version = "0.2.0"
+version = "0.3.0"
 description = "Lightweight Git client with VS Code-quality diffs"
 edition = "2021"
 

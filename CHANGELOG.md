@@ -6,8 +6,23 @@ All notable changes to Hunkpad are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-25
+
 ### Added
 
+- Search: Ctrl+P finds a file by name, Ctrl+Shift+F finds text in all files,
+  and Ctrl+click (or Shift+F12) on a word lists where it is used.
+- Markdown preview: .md files open rendered; links into the repository open in
+  Hunkpad, web links in the browser, and repository images show inline.
+- Quick actions row: Terminal here, Copy path.
+- Claude Code can use Hunkpad over MCP (off by default; one click adds it to
+  Claude Code): it sees the open repository, file, cursor and changes, manages
+  change groups and comments, opens files, and stages or commits a group after
+  you approve the Git command in Hunkpad.
+- Top bar with Projects, Search, the Claude Code (MCP) button and a theme
+  picker: System, Light, Dark and Retro.
+- Comments tab: Resolve all, Reopen all, Copy and Drop all, acting on the
+  filtered list.
 - Optional Claude features (off by default; ⋯ → Claude features…), run through
   the user's own Claude Code CLI: draft commit messages, organize changes into
   groups, review changes as comments, describe a branch for a pull request,
@@ -15,8 +30,8 @@ All notable changes to Hunkpad are listed here. The format follows
   shown before it is sent; Kept local and secret-looking files are never sent.
 - Git worktrees: the Branches tab lists the repository's worktrees; create one
   (new or existing branch, or detached) from there, from a branch, tag or
-  commit, or from ⋯ → New worktree…; open, lock, move, remove and prune them. A branch checked out in another worktree
-  opens that worktree instead. Claude Code sees the worktrees over MCP and can
+  commit, or from ⋯ → New worktree…; open, lock, move, remove and prune them.
+  A branch checked out in another worktree opens that worktree instead. Claude Code sees the worktrees over MCP and can
   switch to one. A repository's worktrees share its tab: the Worktree bar under
   the tabs switches between them.
 - Worktree setup (⚙ Setup): files Git does not track (e.g. .env) are copied
@@ -32,6 +47,8 @@ All notable changes to Hunkpad are listed here. The format follows
 
 ### Fixed
 
+- Under `npm run tauri dev`, consoles started from Hunkpad stay open when the
+  app rebuilds.
 - A linked worktree now refreshes when it is staged, committed or checked out
   from a terminal (its index and HEAD live outside its folder).
 
@@ -76,5 +93,6 @@ All notable changes to Hunkpad are listed here. The format follows
 
 First version (as Diffpane), for Windows.
 
-[Unreleased]: https://github.com/AleB93/Hunkpad/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/AleB93/Hunkpad/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/AleB93/Hunkpad/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/AleB93/Hunkpad/releases/tag/v0.2.0
