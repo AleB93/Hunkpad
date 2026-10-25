@@ -15,7 +15,9 @@ import {
   parseFindings,
   parseGroupPlan,
   parseResolution,
+  parseSetupSuggestion,
   parseText,
+  setupPrompt,
 } from "../src/claude";
 
 describe("CLI output", () => {
@@ -136,5 +138,30 @@ describe("conflicts", () => {
   it("fences the file so backticks inside cannot end it", () => {
     const prompt = conflictPrompt("x.md", "merge", "````\ncode\n````");
     expect(prompt).toContain("\n`````\n````\ncode\n````\n`````");
+  });
+});
+
+describe("worktree setup", () => {
+  const untracked = [".env.local", "node_modules/", "web/.env", "dist/"];
+
+  it("keeps only untracked paths, one command line and a port in range", () => {
+    const s = parseSetupSuggestion(
+      { copy: ["./.env.local", "web/.env", "src/index.ts", "../secret", "node_modules/react"], command: "pnpm install &&\n pnpm --dir web install", basePort: 99999, explanation: " ok " },
+      untracked,
+    );
+    expect(s).toEqual({ copy: [".env.local", "web/.env", "node_modules/react"], command: "pnpm install && pnpm --dir web install", basePort: null, explanation: "ok" });
+    expect(() => parseSetupSuggestion({ copy: "x" }, untracked)).toThrow(ClaudeError);
+  });
+
+  it("sends names, the current setup and manifests, not untracked contents", () => {
+    const prompt = setupPrompt({
+      tracked: ["package.json"],
+      untracked,
+      manifests: [{ path: "package.json", text: '{"name":"a"}' }],
+      current: { copy: [], command: "pnpm install", basePort: null },
+    });
+    expect(prompt).toContain(".env.local");
+    expect(prompt).toContain('{"name":"a"}');
+    expect(prompt).toContain('"command": "pnpm install"');
   });
 });

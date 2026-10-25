@@ -406,3 +406,93 @@ export function parseResolution(answer: unknown, original: string): { content: s
   if (crlf) text = text.replace(/\n/g, "\r\n");
   return { content: text, explanation: typeof explanation === "string" ? explanation.trim() : "" };
 }
+
+// ---- 7. worktree setup ----------------------------------------------------------
+
+export interface SetupSuggestion {
+  copy: string[];
+  command: string;
+  basePort: number | null;
+  explanation: string;
+}
+
+export const SETUP_SYSTEM =
+  "You configure how a new Git worktree of a repository is prepared so its code runs. Git only checks out " +
+  "committed files, so you choose (1) which files or folders that Git does not track must be copied from the main " +
+  "folder: local configuration and environment files the code needs (e.g. .env.local), never dependencies, caches or " +
+  "build output (node_modules, dist, .next, target, .venv...), and (2) one shell command line run in the new worktree " +
+  "to install dependencies. For Node.js use pnpm (pnpm install; for packages in subfolders, pnpm --dir <folder> install, " +
+  "joined with &&). Use other ecosystems' usual install commands. Suggest a base port only when the project clearly " +
+  "runs a dev server that reads the PORT environment variable; otherwise null. You see file names only, never contents " +
+  "of untracked files.";
+
+export const SETUP_SCHEMA = {
+  type: "object",
+  properties: {
+    copy: {
+      type: "array",
+      items: { type: "string" },
+      description: "Repo-relative paths, chosen from the untracked files listed.",
+    },
+    command: { type: "string", description: "One command line, or empty for none." },
+    basePort: { type: ["integer", "null"] },
+    explanation: { type: "string", description: "Markdown, 2-5 short bullet points: why each choice." },
+  },
+  required: ["copy", "command", "basePort", "explanation"],
+  additionalProperties: false,
+};
+
+/** Paths beyond this are left out of the request (and said to be). */
+const MAX_SETUP_PATHS = 2000;
+
+export function setupPrompt(input: {
+  tracked: string[];
+  untracked: string[];
+  manifests: { path: string; text: string }[];
+  current: { copy: string[]; command: string; basePort: number | null };
+}): string {
+  const list = (paths: string[]) =>
+    paths.length > MAX_SETUP_PATHS
+      ? [...paths.slice(0, MAX_SETUP_PATHS), `… and ${paths.length - MAX_SETUP_PATHS} more`]
+      : paths.length ? paths : ["(none)"];
+  const out = [
+    "Suggest the worktree setup for this repository.",
+    "",
+    "Current setup:",
+    "```json",
+    JSON.stringify(input.current, null, 2),
+    "```",
+    "",
+    "Files and folders in the main folder that Git does not track (names only; folders end with /):",
+    ...list(input.untracked),
+    "",
+    "Tracked files:",
+    ...list(input.tracked),
+  ];
+  for (const m of input.manifests) {
+    const fence = "`".repeat(Math.max(3, ...[...m.text.matchAll(/`+/g)].map((x) => x[0].length + 1)));
+    out.push("", `### ${m.path}`, fence, m.text, fence);
+  }
+  return out.join("\n");
+}
+
+/**
+ * Claude's setup, checked: only paths from the untracked list (and valid
+ * repo-relative ones), a single-line command, a port in range.
+ */
+export function parseSetupSuggestion(answer: unknown, untracked: string[]): SetupSuggestion {
+  const a = (answer ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(a.copy) || typeof a.command !== "string") throw new ClaudeError("Claude returned no setup");
+  const known = new Set(untracked.map((p) => p.replace(/\/$/, "")));
+  const copy = [
+    ...new Set(
+      a.copy
+        .filter((p): p is string => typeof p === "string")
+        .map((p) => p.trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, ""))
+        .filter((p) => known.has(p) || [...known].some((k) => p.startsWith(`${k}/`))),
+    ),
+  ];
+  const command = a.command.replace(/\s*[\r\n]+\s*/g, " ").trim();
+  const port = typeof a.basePort === "number" && Number.isInteger(a.basePort) && a.basePort > 0 && a.basePort <= 65000 ? a.basePort : null;
+  return { copy, command, basePort: port, explanation: typeof a.explanation === "string" ? a.explanation.trim() : "" };
+}

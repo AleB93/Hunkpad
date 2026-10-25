@@ -64,6 +64,28 @@ const commands: Record<string, (a: any) => unknown> = {
   watch_repo: () => null,
   unwatch_repo: () => null,
   launch_script: () => null,
+  launch_command: () => null,
+  copy_into_worktree: ({ from, to, paths }) => {
+    const report = { copied: [] as string[], kept: [] as string[], missing: [] as string[] };
+    const copy = (src: string, dst: string, rel: string) => {
+      const st = fs.lstatSync(src);
+      if (st.isDirectory()) {
+        fs.mkdirSync(dst, { recursive: true });
+        for (const name of fs.readdirSync(src)) copy(path.join(src, name), path.join(dst, name), `${rel}/${name}`);
+      } else if (st.isFile()) {
+        if (fs.existsSync(dst)) return void report.kept.push(rel);
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.copyFileSync(src, dst);
+        report.copied.push(rel);
+      }
+    };
+    for (const p of paths as string[]) {
+      const src = safeJoin(from, p);
+      if (!fs.existsSync(src)) report.missing.push(p);
+      else copy(src, safeJoin(to, p), p);
+    }
+    return report;
+  },
   open_terminal: () => null,
   open_git_download: () => null,
   open_token_page: () => null,

@@ -29,6 +29,9 @@ function fakeHost(): McpHost & { calls: unknown[][] } {
     openFile: async (...a: unknown[]) => void calls.push(["openFile", ...a]),
     stageGroup: async () => "done",
     commitGroup: async () => "cancelled",
+    worktreeSetup: async () => ({ saved: false }),
+    setWorktreeSetup: async (c: object) => (calls.push(["setWorktreeSetup", c]), "done"),
+    runWorktreeSetup: async (w: string) => (calls.push(["runWorktreeSetup", w]), { outcome: "cancelled" }),
   };
 }
 
@@ -101,5 +104,16 @@ describe("MCP helpers", () => {
     expect(args).toContain(`Authorization: Bearer ${"t".repeat(64)}`);
     // --header is variadic: name and URL must come before it.
     expect(args.slice(-4)).toEqual(["hunkpad", "http://127.0.0.1:47821/mcp", "--header", `Authorization: Bearer ${"t".repeat(64)}`]);
+  });
+});
+
+describe("worktree setup tools", () => {
+  it("passes only the fields given, and checks them", async () => {
+    const host = fakeHost();
+    expect(text(await call(host, "hunkpad_set_worktree_setup", { command: "pnpm install", basePort: null }))).toContain("done");
+    expect(host.calls).toContainEqual(["setWorktreeSetup", { command: "pnpm install", basePort: null }]);
+    expect(text(await call(host, "hunkpad_set_worktree_setup", { basePort: 70000 }))).toMatch(/basePort/);
+    expect(text(await call(host, "hunkpad_set_worktree_setup", {}))).toMatch(/give copy/);
+    expect(text(await call(host, "hunkpad_run_worktree_setup", { worktree: "/r/wt" }))).toContain("declined");
   });
 });

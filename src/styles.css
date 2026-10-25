@@ -299,7 +299,8 @@ dialog.picker[open] { display: flex; flex-direction: column; gap: 8px; }
 dialog::backdrop { background: rgb(0 0 0 / 0.35); }
 dialog form { display: flex; flex-direction: column; gap: 10px; }
 dialog input,
-dialog select {
+dialog select,
+dialog textarea {
   font: inherit;
   color: inherit;
   background: var(--bg-side);
@@ -417,6 +418,36 @@ body.repo-colored .repo-tab.active {
 #commit-as.err { color: var(--del); }
 dialog label.field { display: flex; flex-direction: column; gap: 3px; }
 dialog p { margin: 0; }
+#worktree-dialog, #setup-dialog { width: 520px; max-width: 90vw; }
+#setup-copy { resize: vertical; font-family: var(--mono, monospace); font-size: 12px; }
+#worktree-path { flex: 1; min-width: 0; }
+.repo-tab .wt { font-size: 11px; opacity: 0.7; }
+#worktree-bar { display: flex; align-items: center; gap: 6px; padding: 3px 10px; background: var(--bg-side); border-bottom: 1px solid var(--border); }
+#worktree-bar.hidden, body:not(.has-repo) #worktree-bar { display: none; }
+#worktree-bar > .small { width: 56px; flex: none; }
+#worktree-bar > button { flex: none; padding: 1px 9px; }
+#worktree-tabs { display: flex; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.wt-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  max-width: 260px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.wt-tab::before { content: "⎇"; opacity: 0.7; }
+.wt-tab .name { overflow: hidden; text-overflow: ellipsis; }
+.wt-tab:hover { background: var(--hover); }
+.wt-tab.open { color: var(--fg); }
+.wt-tab.active { color: var(--fg); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 600; }
+.wt-tab.missing { opacity: 0.5; text-decoration: line-through; }
+.wt-tab .icon { padding: 0 2px; min-width: 0; }
 .user-tab .identity { font-size: 11px; font-weight: 400; color: var(--muted); max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
 .user-tab .identity .global { font-style: italic; }
 

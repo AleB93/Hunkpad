@@ -20,6 +20,7 @@ import {
   Repo,
   RepoStatus,
   Stash,
+  Worktree,
   cloneRepo,
   credentialTarget,
   runGit,
@@ -43,6 +44,10 @@ import {
   ClaudeCancelledError,
   ClaudeSignInError,
   EXPLAIN_SYSTEM,
+  SETUP_SCHEMA,
+  SETUP_SYSTEM,
+  parseSetupSuggestion,
+  setupPrompt,
   MAX_PROMPT_BYTES,
   ORGANIZE_SCHEMA,
   ORGANIZE_SYSTEM,
@@ -76,7 +81,9 @@ import {
   loadRepoData,
   setRepoStoreCreatedHandler,
   setRepoStoreErrorHandler,
+  type WorktreeSetup,
 } from "./repoStore";
+import { COMMON_LOCAL_FILES, inWorktree, parseCopyList, validCopyPath, worktreeEnv } from "./worktrees";
 import {
   Hunk,
   HunkAssignment,
@@ -101,7 +108,9 @@ import {
   loadHunkState,
   loadKeptLocal,
   loadScripts,
+  loadWorktreeSetup,
   saveScripts,
+  saveWorktreeSetup,
   UserScript,
   saveKeptLocal,
   saveHunkState,
@@ -119,7 +128,7 @@ import {
   touchProject,
   updateProject,
 } from "./projects";
-import { isLinux, isMac, isWindows, keys, localizeShortcuts, primaryKey, samePath } from "./platform";
+import { isLinux, isMac, isWindows, keys, localizeShortcuts, pathKey, primaryKey, samePath } from "./platform";
 import { setSettingsErrorHandler, settings } from "./settings";
 
 // The diff view is read-only, so the generic editor worker is enough;
@@ -391,6 +400,26 @@ function explainGit(args: string[]): { text: string; danger: boolean } {
       if (has("--detach")) return say("Switches to that commit without a branch (detached HEAD).");
       if (has("--track")) return say("Creates a local branch that tracks the remote branch, and switches to it.");
       return say("Switches the working tree to another branch or commit.");
+    case "worktree":
+      switch (rest[0]) {
+        case "add":
+          if (has("-b")) return say("Creates a new folder (a linked worktree) with a new branch checked out in it. This folder is not changed.");
+          if (has("--detach")) return say("Creates a new folder (a linked worktree) with that commit checked out, without a branch. This folder is not changed.");
+          return say("Creates a new folder (a linked worktree) with that branch checked out in it. This folder is not changed.");
+        case "remove":
+          return has("--force")
+            ? say("Deletes the worktree's folder although it has uncommitted changes or untracked files: they are lost. Its branch and commits stay.", true)
+            : say("Deletes the worktree's folder (it has no uncommitted changes). Its branch and commits stay.");
+        case "move":
+          return say("Moves the worktree's folder to the new path.");
+        case "lock":
+          return say("Locks the worktree so Git does not prune or remove it (e.g. while it is on a removable disk).");
+        case "unlock":
+          return say("Unlocks the worktree: it can be pruned and removed again.");
+        case "prune":
+          return say("Forgets the worktrees whose folder was deleted. Nothing on disk is touched.");
+      }
+      return say("Runs this Git command.");
     case "branch":
       if (has("-D")) return say("Deletes the branch even if it is not merged: its unmerged commits can be lost.", true);
       if (has("-d")) return say("Deletes the branch (only if it is merged).");
@@ -2796,6 +2825,8 @@ async function openRepoNow(path: string) {
   }
   if (!openTabs.some((t) => samePath(t, r.root))) openTabs.push(r.root);
   r.config = identityConfig(activeUser());
+  lastInGroup.set(pathKey(groupOf(r.root)), r.root);
+  if (!samePath(groupOf(r.root), r.root)) await loadRepoData(groupOf(r.root)).catch(() => null); // the repository's colour
 
   repo = r;
   status = null;
@@ -2812,11 +2843,15 @@ async function openRepoNow(path: string) {
   target = saved?.target ?? null; // re-shown by refresh() if still valid
 
   touchProject(r.root, r.name);
-  document.title = `Hunkpad — ${projectName(r.root)}`;
+  const main = groupOf(r.root);
+  document.title = `Hunkpad — ${projectName(main)}${samePath(main, r.root) ? "" : ` ⎇ ${folderName(r.root)}`}`;
   document.body.classList.add("has-repo");
   renderTabs();
   persistTabs();
-  await invoke("watch_repo", { repo: r.root });
+  worktrees = [];
+  // A linked worktree's index and HEAD are outside its folder: watch them too.
+  const dirs = await r.gitDirs();
+  await invoke("watch_repo", { repo: r.root, gitDir: dirs?.gitDir ?? null, commonDir: dirs?.commonDir ?? null });
   await showTab(saved?.sideTab ?? "changes");
   updateCommitAs().catch(showError);
   await refresh();
@@ -2847,9 +2882,13 @@ function closeTab(root: string) {
   if (i < 0) return;
   openTabs.splice(i, 1);
   tabStates.delete(root.toLowerCase());
+  // The repository's tab keeps its place while another of its worktrees is open.
+  const sibling = openTabs.findIndex((t) => samePath(groupOf(t), groupOf(root)));
+  if (sibling > i) openTabs.splice(i, 0, ...openTabs.splice(sibling, 1));
   if (repo && samePath(repo.root, root)) {
-    // Activate the neighbour, like a browser does.
-    const next = openTabs[Math.min(i, openTabs.length - 1)];
+    // Another open worktree of the same repository, else the neighbour, like a browser does.
+    const next =
+      openTabs.find((t) => samePath(groupOf(t), groupOf(root))) ?? openTabs[Math.min(i, openTabs.length - 1)];
     repo = null;
     if (next) openRepo(next).catch(showError);
     else showNoRepo();
@@ -2858,10 +2897,12 @@ function closeTab(root: string) {
   persistTabs();
 }
 
+/** Ctrl+Tab goes from repository to repository (to the worktree last used in each). */
 function cycleTab(step: number) {
-  if (openTabs.length < 2 || !repo) return;
-  const i = openTabs.findIndex((t) => samePath(t, repo!.root));
-  openRepo(openTabs[(i + step + openTabs.length) % openTabs.length]).catch(showError);
+  const groups = tabGroups();
+  if (groups.length < 2 || !repo) return;
+  const i = groups.findIndex((g) => samePath(g.main, groupOf(repo!.root)));
+  openRepo(groupTarget(groups[(i + step + groups.length) % groups.length])).catch(showError);
 }
 
 function pickCustomColor(root: string) {
@@ -2875,7 +2916,8 @@ function pickCustomColor(root: string) {
   input.click();
 }
 
-function tabMenu(root: string): MenuItem[] {
+/** A repository tab's menu: `root` is the main work tree, `members` its open worktree tabs. */
+function tabMenu(root: string, members: string[]): MenuItem[] {
   const current = repoColor(root);
   return [
     ...REPO_COLORS.map(
@@ -2914,18 +2956,20 @@ function tabMenu(root: string): MenuItem[] {
         label: `Move to ${u.label}`,
         run: () => {
           const tabs = loadUserTabs(u.id);
-          if (!tabs.paths.some((p) => samePath(p, root))) saveUserTabs(u.id, [...tabs.paths, root], tabs.active ?? root);
-          closeTab(root);
+          const add = members.filter((m) => !tabs.paths.some((p) => samePath(p, m)));
+          saveUserTabs(u.id, [...tabs.paths, ...add], tabs.active ?? members[0]);
+          closeGroup(members);
           setStatus(`${projectName(root)} moved to ${u.label}`);
         },
       })),
     "-",
-    { label: "Close", run: () => closeTab(root) },
+    { label: members.length > 1 ? `Close (${members.length} worktrees)` : "Close", run: () => closeGroup(members) },
     {
       label: "Close others",
       run: () => {
-        for (const t of openTabs.filter((t) => !samePath(t, root))) closeTab(t);
-        if (!repo || !samePath(repo.root, root)) openRepo(root).catch(showError);
+        const keep = members.some((m) => repo && samePath(m, repo.root)) ? repo!.root : members[0];
+        for (const t of openTabs.filter((t) => !members.some((m) => samePath(m, t)))) closeTab(t);
+        if (!repo || !samePath(repo.root, keep)) openRepo(keep).catch(showError);
       },
     },
   ];
@@ -2933,37 +2977,114 @@ function tabMenu(root: string): MenuItem[] {
 
 /** Frames the area below the tabs in the active repository's colour. */
 function applyRepoColor() {
-  const color = repo ? repoColor(repo.root) : null;
+  const color = repo ? repoColor(groupOf(repo.root)) : null;
   document.body.classList.toggle("repo-colored", !!color);
   if (color) document.body.style.setProperty("--repo-color", color);
   else document.body.style.removeProperty("--repo-color");
+}
+
+// One tab per repository: the open worktrees of a repository share its tab,
+// and the worktree bar below the tabs switches between them.
+
+/** The main work tree of `root` (itself, unless it is a known linked worktree). */
+const groupOf = (root: string) => worktreeMain.get(pathKey(root)) ?? root;
+
+/** Open tabs grouped by repository, in the order each repository was first opened. */
+function tabGroups(): { main: string; members: string[] }[] {
+  const groups: { main: string; members: string[] }[] = [];
+  for (const t of openTabs) {
+    const main = groupOf(t);
+    const g = groups.find((x) => samePath(x.main, main));
+    if (g) g.members.push(t);
+    else groups.push({ main, members: [t] });
+  }
+  return groups;
+}
+
+/** Each repository's worktree last shown (by pathKey of its main work tree). */
+const lastInGroup = new Map<string, string>();
+
+function groupTarget(g: { main: string; members: string[] }): string {
+  const last = lastInGroup.get(pathKey(g.main));
+  return g.members.find((m) => last && samePath(m, last)) ?? g.members[0];
+}
+
+/** Closes a repository's tab: all its open worktrees at once. */
+function closeGroup(members: string[]) {
+  const inGroup = (t: string) => members.some((m) => samePath(m, t));
+  const index = tabGroups().findIndex((g) => g.members.some(inGroup));
+  openTabs = openTabs.filter((t) => !inGroup(t));
+  for (const m of members) tabStates.delete(m.toLowerCase());
+  if (repo && inGroup(repo.root)) {
+    // Activate the neighbouring repository, like a browser does.
+    const rest = tabGroups();
+    const next = rest[Math.min(index, rest.length - 1)];
+    repo = null;
+    if (next) openRepo(groupTarget(next)).catch(showError);
+    else showNoRepo();
+  }
+  renderTabs();
+  persistTabs();
 }
 
 function renderTabs() {
   applyRepoColor();
   renderUsers();
   renderScripts();
+  renderWorktreeBar();
   $("repo-tabs").replaceChildren(
-    ...openTabs.map((root) => {
-      const active = !!repo && samePath(repo.root, root);
-      const color = repoColor(root);
+    ...tabGroups().map((g) => {
+      const { main, members } = g;
+      const active = !!repo && members.some((m) => samePath(m, repo!.root));
+      const color = repoColor(main);
+      const shown = active ? repo!.root : groupTarget(g);
+      const branchNote = !samePath(shown, main) ? `\nShowing the worktree ${shown}` : "";
       const tab = h(
         "div",
         {
           class: `repo-tab${active ? " active" : ""}${color ? " colored" : ""}`,
-          title: `${root}\nRight-click for colour and more`,
-          onclick: () => !active && openRepo(root).catch(showError),
-          onauxclick: (e: MouseEvent) => e.button === 1 && closeTab(root),
+          title: `${main}${branchNote}\nRight-click for colour and more`,
+          onclick: () => !active && openRepo(groupTarget(g)).catch(showError),
+          onauxclick: (e: MouseEvent) => e.button === 1 && closeGroup(members),
         },
         h("span", { class: "dot" }),
-        h("span", { class: "name" }, projectName(root)),
-        iconBtn("✕", keys("Close tab (Ctrl+W)"), () => closeTab(root)),
+        h("span", { class: "name" }, projectName(main)),
+        members.length > 1 ? h("span", { class: "wt", title: `${members.length} worktrees open` }, `⎇${members.length}`) : null,
+        iconBtn("✕", members.length > 1 ? `Close this repository's ${members.length} worktree tabs` : keys("Close tab (Ctrl+W)"), () => closeGroup(members)),
       );
       if (color) tab.style.setProperty("--tab-color", color);
-      return withContextMenu(tab, () => tabMenu(root));
+      return withContextMenu(tab, () => tabMenu(main, members));
     }),
   );
 }
+
+/** Under the tabs, for a repository with linked worktrees: one button per worktree. */
+function renderWorktreeBar() {
+  const bar = $("worktree-bar");
+  const r = repo;
+  const list = r && worktrees.length > 1 ? worktrees : [];
+  bar.classList.toggle("hidden", !list.length);
+  $("worktree-tabs").replaceChildren(
+    ...list.map((w) => {
+      const current = samePath(w.path, r!.root);
+      const tab = openTabs.find((t) => samePath(t, w.path));
+      const label = w.branch ?? `detached ${w.sha.slice(0, 7)}`;
+      const el = h(
+        "div",
+        {
+          class: `wt-tab${current ? " active" : ""}${tab ? " open" : ""}${w.prunable ? " missing" : ""}`,
+          title: `${w.path}${w.main ? "\nMain worktree" : ""}${w.prunable ? "\nFolder missing: prune it from the Branches tab" : ""}${current ? "" : "\nClick to switch to it"}`,
+          onclick: () => !current && openWorktree(w),
+        },
+        h("span", { class: "name" }, label),
+        tab && !current ? iconBtn("✕", "Close this worktree's tab (the folder stays)", () => closeTab(tab)) : null,
+      );
+      return withContextMenu(el, () => worktreeMenu(w));
+    }),
+  );
+}
+$("add-worktree").addEventListener("click", () => newWorktreeFlow().catch(showError));
+$("worktree-setup-btn").addEventListener("click", () => editSetup(mainPath()).catch(showError));
 
 let refreshing: Promise<void> | null = null;
 let refreshAgain = false;
@@ -2986,9 +3107,13 @@ async function refresh(): Promise<void> {
 async function refreshOnce() {
   if (!repo) return;
   const r = repo;
-  const s = await r.status();
+  const [s, wts] = await Promise.all([r.status(), r.worktrees()]);
   if (repo !== r) return; // switched tab meanwhile; the next pass handles the new one
   status = s;
+  worktrees = wts;
+  const main = wts.find((w) => w.main);
+  if (noteWorktrees(wts) && main) await loadRepoData(main.path).catch(() => null);
+  renderTabs();
   if (viewMode === "time") await loadFileTimes(r, s);
   await loadBlocks(r, s);
   if (repo !== r) return;
@@ -4022,6 +4147,7 @@ function commitMenu(c: Commit): MenuItem[] {
   const r = repo!;
   return [
     { label: "Checkout (detached)", run: () => checkoutAct(c.shortSha, () => r.checkoutDetached(c.sha)) },
+    { label: "New worktree here…", run: () => newWorktreeFlow({ base: c.shortSha }).catch(showError) },
     {
       label: "Create branch here…",
       run: async () => {
@@ -4140,7 +4266,10 @@ function refMenu(ref: Ref, refs: Ref[]): MenuItem[] {
     { label: fav ? "Remove from favourites" : "Add to favourites", run: () => toggleFavouriteRef(ref) },
     "-",
   ];
-  if (!ref.current) items.push({ label: "Checkout", run: () => checkoutRef(ref, refs) });
+  const elsewhere = ref.kind === "local" ? worktreeWith(ref.name) : undefined;
+  if (elsewhere) items.push({ label: `Open its worktree (${folderName(elsewhere.path)})`, run: () => openWorktree(elsewhere) });
+  else if (!ref.current) items.push({ label: "Checkout", run: () => checkoutRef(ref, refs) });
+  if (!ref.current && !elsewhere) items.push({ label: "New worktree from this…", run: () => newWorktreeFor(ref).catch(showError) });
   if (!ref.current && ref.kind !== "tag") {
     items.push(
       { label: "Compare my files with this", run: () => setCompare(ref.name).catch(showError) },
@@ -4320,7 +4449,7 @@ let branchRemotes: Remote[] = [];
 
 async function loadBranches() {
   if (!repo) return;
-  [branchRefs, branchRemotes] = await Promise.all([repo.refs(), repo.remoteList()]);
+  [branchRefs, branchRemotes, worktrees] = await Promise.all([repo.refs(), repo.remoteList(), repo.worktrees()]);
   renderBranches();
 }
 
@@ -4349,13 +4478,16 @@ function renderBranches() {
 
   const item = (ref: Ref) => {
     const fav = favourites.has(refKey(ref));
+    const elsewhere = ref.kind === "local" ? worktreeWith(ref.name) : undefined;
     return withContextMenu(
       h(
         "div",
         {
           class: `item${ref.current ? " current" : ""}`,
-          title: ref.kind === "local" ? "Double-click to check out" : ref.name,
-          ondblclick: () => !ref.current && checkoutRef(ref, refs),
+          title: elsewhere
+            ? `Checked out in the worktree ${elsewhere.path}: double-click to open it`
+            : ref.kind === "local" ? "Double-click to check out" : ref.name,
+          ondblclick: () => (elsewhere ? openWorktree(elsewhere) : !ref.current && checkoutRef(ref, refs)),
         },
         h("span", { class: "status" }, ref.current ? "✓" : ""),
         h(
@@ -4364,7 +4496,11 @@ function renderBranches() {
           iconBtn(fav ? "★" : "☆", fav ? "Remove from favourites" : "Add to favourites", () => toggleFavouriteRef(ref)),
         ),
         h("span", { class: "name" }, ref.name),
-        h("span", { class: "dir" }, ref.upstream ? `→ ${ref.upstream}` : ref.sha),
+        h(
+          "span",
+          { class: "dir" },
+          [elsewhere ? `⎇ ${folderName(elsewhere.path)}` : "", ref.upstream ? `→ ${ref.upstream}` : ref.sha].filter(Boolean).join("  "),
+        ),
         h("span", { class: "actions" }, menuButton(() => refMenu(ref, refs))),
       ),
       () => refMenu(ref, refs),
@@ -4381,8 +4517,19 @@ function renderBranches() {
   const section = (title: string, list: Ref[], ...actions: HTMLElement[]) =>
     filtering && !list.length ? [] : [sectionHead(title, list.length, ...actions), ...list.map(item)];
 
+  const words = branchFilter.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const wts = worktrees.filter((w) => words.every((x) => `${w.branch ?? ""} ${w.path}`.toLowerCase().includes(x)));
+  const worktreeActions = [
+    iconBtn("⚙", "Worktree setup: files to copy and a command to run in each new worktree", () => editSetup(mainPath()).catch(showError)),
+    iconBtn("+", "New worktree…", () => newWorktreeFlow().catch(showError)),
+    ...(worktrees.some((w) => w.prunable)
+      ? [iconBtn("Prune", "Forget worktrees whose folder was deleted", () => act("Prune worktrees", () => repo!.pruneWorktrees()))]
+      : []),
+  ];
+
   $("branch-list").replaceChildren(
     ...(favs.length ? [sectionHead("Favourites", favs.length), ...favs.map(item)] : []),
+    ...(filtering && !wts.length ? [] : [sectionHead("Worktrees", wts.length, ...worktreeActions), ...wts.map(worktreeRow)]),
     ...section("Branches", local, iconBtn("+", "New branch", newBranch)),
     ...section("Remote branches", remote),
     ...section("Tags", tags, iconBtn("+", "New tag", newTag)),
@@ -4410,6 +4557,460 @@ branchFilter.addEventListener("keydown", (e) => {
     else setStatus(`${matches.length} matches: narrow the filter to one to check it out with Enter`);
   }
 });
+
+// ---- worktrees --------------------------------------------------------------
+//
+// A linked worktree (git worktree add) is another folder of the repository with
+// its own branch checked out. It opens in a tab of its own, like any repository;
+// the Branches tab lists the active repository's worktrees.
+
+/** The active repository's worktrees, the main one first (reloaded with its status). */
+let worktrees: Worktree[] = [];
+/** Linked worktrees seen so far (by pathKey) → their main work tree, for grouping tabs (saved in the settings). */
+const WORKTREE_MAIN_KEY = "worktreeMain";
+const worktreeMain = new Map<string, string>(
+  (() => {
+    try {
+      return Object.entries(JSON.parse(settings.getItem(WORKTREE_MAIN_KEY) ?? "{}") as Record<string, string>);
+    } catch {
+      return [];
+    }
+  })(),
+);
+
+/** Remembers which folders are linked worktrees; true when that is news (tabs need re-rendering). */
+function noteWorktrees(list: Worktree[]): boolean {
+  const main = list.find((w) => w.main);
+  let changed = false;
+  for (const w of list) {
+    if (w.main || !main || worktreeMain.get(pathKey(w.path)) === main.path) continue;
+    worktreeMain.set(pathKey(w.path), main.path);
+    changed = true;
+  }
+  if (changed) {
+    // Keep only the worktrees still listed for this repository.
+    for (const [k, v] of worktreeMain)
+      if (samePath(v, main!.path) && !list.some((w) => pathKey(w.path) === k)) worktreeMain.delete(k);
+    settings.setItem(WORKTREE_MAIN_KEY, JSON.stringify(Object.fromEntries(worktreeMain)));
+  }
+  return changed;
+}
+
+const folderName = (p: string) => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? p;
+
+/** Another worktree that has `branch` checked out (Git allows a branch in one worktree only). */
+function worktreeWith(branch: string): Worktree | undefined {
+  return worktrees.find((w) => w.branch === branch && !(repo && samePath(w.path, repo.root)));
+}
+
+function openWorktree(w: Worktree) {
+  if (w.prunable) return setStatus(`The folder of this worktree is gone: ${w.path}. Prune to forget it.`, true);
+  openRepo(w.path).catch(handleOpenError);
+}
+
+/** The main work tree's repository, to run worktree commands from outside the one they change. */
+async function mainWorktreeRepo(): Promise<Repo> {
+  const main = worktrees.find((w) => w.main);
+  return !main || samePath(main.path, repo!.root) ? repo! : Repo.open(main.path);
+}
+
+/** Leaves `w`'s tab before its folder is moved or deleted; true when it was open. */
+async function closeWorktreeTab(w: Worktree): Promise<boolean> {
+  const tab = openTabs.find((t) => samePath(t, w.path));
+  if (!tab) return false;
+  const main = worktrees.find((x) => x.main);
+  if (repo && samePath(repo.root, w.path) && main) await openRepo(main.path);
+  closeTab(tab);
+  return true;
+}
+
+async function removeWorktreeFlow(w: Worktree) {
+  // Uncommitted work in it is lost with the folder: say so, and only then force.
+  const files = w.prunable ? 0 : ((await Repo.open(w.path).then((x) => x.status()).catch(() => null))?.files.length ?? 0);
+  const what = w.branch ? `The branch ${w.branch} stays.` : "Its commits stay reachable only if a branch or tag points at them.";
+  const warning = files ? `\n\n⚠ ${files} file(s) there have uncommitted changes or are untracked: they will be lost.` : "";
+  if (!(await confirmAction(`Remove the worktree ${w.path}? Its folder is deleted. ${what}${warning}`))) return;
+  const runner = await mainWorktreeRepo();
+  await closeWorktreeTab(w);
+  const outcome = await act(`Remove worktree ${folderName(w.path)}`, () => runner.removeWorktree(w.path, files > 0));
+  if (outcome === "done") removeProject(w.path);
+}
+
+async function moveWorktreeFlow(w: Worktree) {
+  const to = await promptInput("Move the worktree to (full path of a new folder)", w.path);
+  if (!to || samePath(to, w.path)) return;
+  const runner = await mainWorktreeRepo();
+  const wasOpen = await closeWorktreeTab(w);
+  const outcome = await act(`Move worktree ${folderName(w.path)}`, () => runner.moveWorktree(w.path, to));
+  if (wasOpen) await openRepo(outcome === "done" ? to : w.path).catch(handleOpenError);
+}
+
+function worktreeMenu(w: Worktree): MenuItem[] {
+  const r = repo!;
+  const current = samePath(w.path, r.root);
+  const locked = w.locked !== null;
+  const items: MenuItem[] = [];
+  if (!current) items.push({ label: "Open in a tab", run: () => openWorktree(w) });
+  items.push(
+    { label: "Copy path", run: () => navigator.clipboard.writeText(w.path) },
+    {
+      label: "Open terminal here",
+      run: () => invoke("open_terminal", { cwd: w.path }).catch((e) => setStatus(`Could not open a terminal: ${errorText(e)}`, true)),
+    },
+  );
+  if (!w.main && !w.prunable) items.push({ label: "Run setup", run: () => runSetup(w.path).catch(showError) });
+  items.push({ label: "Worktree setup…", run: () => editSetup(mainPath()).catch(showError) });
+  if (!w.main) {
+    items.push(
+      "-",
+      locked
+        ? { label: "Unlock", run: () => act("Unlock worktree", () => r.unlockWorktree(w.path)) }
+        : { label: "Lock (keep it from being pruned)", run: () => act("Lock worktree", () => r.lockWorktree(w.path, "")) },
+    );
+    if (!locked && !w.prunable) items.push({ label: "Move…", run: () => moveWorktreeFlow(w).catch(showError) });
+    if (!locked) items.push({ label: "Remove…", run: () => removeWorktreeFlow(w).catch(showError) });
+  }
+  return items;
+}
+
+function worktreeRow(w: Worktree) {
+  const current = samePath(w.path, repo!.root);
+  const label = w.bare ? "(bare)" : (w.branch ?? `(detached at ${w.sha.slice(0, 7)})`);
+  const flags = [
+    w.main ? "main" : "",
+    w.locked !== null ? `locked${w.locked ? `: ${w.locked}` : ""}` : "",
+    w.prunable ? "folder missing" : "",
+  ].filter(Boolean);
+  return withContextMenu(
+    h(
+      "div",
+      {
+        class: `item${current ? " current" : ""}`,
+        title: `${w.path}${flags.length ? `\n${flags.join(", ")}` : ""}${current ? "" : "\nDouble-click to open in a tab"}`,
+        ondblclick: () => !current && openWorktree(w),
+      },
+      h("span", { class: "status" }, current ? "✓" : "⎇"),
+      h("span", { class: "name" }, label),
+      h("span", { class: "dir" }, [...flags, w.path].join(" · ")),
+      h("span", { class: "actions" }, menuButton(() => worktreeMenu(w))),
+    ),
+    () => worktreeMenu(w),
+  );
+}
+
+const worktreeDialog = $<HTMLDialogElement>("worktree-dialog");
+const wtBranch = $<HTMLInputElement>("worktree-branch");
+const wtBase = $<HTMLInputElement>("worktree-base");
+const wtPath = $<HTMLInputElement>("worktree-path");
+const wtOpen = $<HTMLInputElement>("worktree-open");
+const wtSetupBox = $<HTMLInputElement>("worktree-setup");
+/** The setup the dialog will run (shown next to its checkbox). */
+let wtSetup: WorktreeSetup | null = null;
+let wtPathEdited = false;
+let wtLocal = new Set<string>();
+let wtRemote = new Set<string>();
+let answerWorktree: ((go: boolean) => void) | null = null;
+
+type WorktreeAdd = Parameters<Repo["addWorktree"]>[1];
+
+/** What the dialog's fields ask for: the `git worktree add` options, in words, and any error. */
+function worktreePlan(): { opts: WorktreeAdd; plan: string; error: string } {
+  const branch = wtBranch.value.trim();
+  const base = wtBase.value.trim();
+  if (branch && wtLocal.has(branch)) {
+    const other = worktrees.find((w) => w.branch === branch);
+    return {
+      opts: { ref: branch },
+      plan: `Checks out the existing branch ${branch}.`,
+      error: other ? `${branch} is already checked out in ${other.path}: a branch can be in one worktree at a time.` : "",
+    };
+  }
+  if (branch) {
+    const track = wtRemote.has(base);
+    return {
+      opts: { newBranch: branch, ref: base || undefined, track },
+      plan: `Creates the branch ${branch} from ${base || "HEAD"}${track ? `, tracking ${base}` : ""}.`,
+      error: "",
+    };
+  }
+  return { opts: { detach: true, ref: base || undefined }, plan: `No branch: detached at ${base || "HEAD"}.`, error: "" };
+}
+
+/** Next to the main work tree: `<parent>/<repo>-<branch>`. */
+function suggestedWorktreePath(): string {
+  const main = (worktrees.find((w) => w.main)?.path ?? repo!.root).replace(/[\\/]+$/, "");
+  const name = (wtBranch.value.trim() || wtBase.value.trim() || "detached").replace(/[^\w.-]+/g, "-");
+  return `${main.slice(0, Math.max(main.lastIndexOf("/"), main.lastIndexOf("\\")))}/${folderName(main)}-${name}`;
+}
+
+function updateWorktreeDialog() {
+  const { plan, error } = worktreePlan();
+  wtBase.disabled = wtLocal.has(wtBranch.value.trim());
+  if (!wtPathEdited) wtPath.value = suggestedWorktreePath();
+  $("worktree-plan").textContent = plan;
+  $("worktree-error").textContent = error;
+}
+
+for (const input of [wtBranch, wtBase]) input.addEventListener("input", updateWorktreeDialog);
+wtPath.addEventListener("input", () => {
+  wtPathEdited = true;
+  $("worktree-error").textContent = "";
+});
+$("worktree-browse").addEventListener("click", async () => {
+  const dir = await open({ directory: true, title: "Create the worktree in which folder?" });
+  if (typeof dir !== "string") return;
+  wtPath.value = `${dir.replace(/[\\/]+$/, "")}/${folderName(suggestedWorktreePath())}`;
+  wtPathEdited = true;
+});
+$("worktree-create").addEventListener("click", () => {
+  const path = wtPath.value.trim();
+  let error = worktreePlan().error;
+  if (!error && !/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(path)) error = "Enter the full path of a new folder.";
+  $("worktree-error").textContent = error;
+  if (error) return;
+  answerWorktree?.(true);
+  worktreeDialog.close();
+});
+$("worktree-cancel").addEventListener("click", () => {
+  answerWorktree?.(false);
+  worktreeDialog.close();
+});
+worktreeDialog.addEventListener("cancel", () => answerWorktree?.(false));
+worktreeDialog.querySelector("form")!.addEventListener("submit", (e) => {
+  e.preventDefault();
+  $("worktree-create").click();
+});
+
+/** Asks for the branch, start point and folder, then creates the worktree (and opens it). */
+async function newWorktreeFlow(preset: { branch?: string; base?: string } = {}) {
+  const r = repo;
+  if (!r) return;
+  const [refs, list] = await Promise.all([r.refs(), r.worktrees()]);
+  worktrees = list;
+  wtLocal = new Set(refs.filter((x) => x.kind === "local").map((x) => x.name));
+  wtRemote = new Set(refs.filter((x) => x.kind === "remote").map((x) => x.name));
+  wtBranch.value = preset.branch ?? "";
+  wtBase.value = preset.base ?? status?.branch ?? "";
+  wtPathEdited = false;
+  wtOpen.checked = loadFlag("worktreeOpen", true);
+  wtSetup = await effectiveSetup(mainPath());
+  wtSetupBox.checked = loadFlag("worktreeSetup", true);
+  $("worktree-setup-summary").textContent = setupSummary(wtSetup);
+  updateWorktreeDialog();
+  worktreeDialog.showModal();
+  wtBranch.focus();
+  const go = await new Promise<boolean>((resolve) => (answerWorktree = resolve));
+  answerWorktree = null;
+  if (!go) return;
+  const path = wtPath.value.trim();
+  const openIt = wtOpen.checked;
+  const setUp = wtSetupBox.checked && wtSetup;
+  saveFlag("worktreeOpen", openIt);
+  saveFlag("worktreeSetup", wtSetupBox.checked);
+  const outcome = await act(`New worktree ${folderName(path)}`, () => r.addWorktree(path, worktreePlan().opts));
+  if (outcome !== "done") return;
+  if (setUp) {
+    worktrees = await r.worktrees(); // its number, for the setup command's variables
+    await runSetup(path, setUp);
+  }
+  if (openIt) await openRepo(path).catch(handleOpenError);
+}
+
+$("worktree-setup-edit").addEventListener("click", async () => {
+  const next = await editSetup(mainPath());
+  if (!next) return;
+  wtSetup = next;
+  $("worktree-setup-summary").textContent = setupSummary(next);
+});
+
+// ---- worktree setup: what a new worktree needs to run -----------------------
+//
+// Git puts only committed files in a new worktree. The setup copies the local
+// files the code needs (e.g. .env) from the main work tree and runs a command
+// there (pnpm install by default for a Node project). Saved per repository.
+
+/** The repository's main work tree (where the setup copies from and is saved). */
+const mainPath = () => worktrees.find((w) => w.main)?.path ?? groupOf(repo!.root);
+
+/** The saved setup, or the suggested one: Kept local and common env files that exist, and pnpm install for Node. */
+async function effectiveSetup(main: string): Promise<WorktreeSetup> {
+  await loadRepoData(main).catch(() => null);
+  const saved = loadWorktreeSetup(main);
+  if (saved) return saved;
+  const local = [...loadKeptLocal(main), ...COMMON_LOCAL_FILES].filter(
+    (p) => p !== DATA_DIR && !p.startsWith(`${DATA_DIR}/`),
+  );
+  const candidates = [...new Set(local), "package.json"];
+  const exists = await invoke<boolean[]>("paths_exist", { base: main, paths: candidates }).catch(() => [] as boolean[]);
+  return {
+    copy: candidates.slice(0, -1).filter((_, i) => exists[i]),
+    command: exists[candidates.length - 1] ? "pnpm install" : "",
+    basePort: null,
+  };
+}
+
+function setupSummary(s: WorktreeSetup): string {
+  const steps = [
+    s.copy.length ? `copy ${s.copy.length === 1 ? s.copy[0] : `${s.copy.length} local files`}` : "",
+    s.command ? `run ${s.command}` : "",
+  ].filter(Boolean);
+  return steps.join(", then ") || "nothing to do yet";
+}
+
+const setupDialog = $<HTMLDialogElement>("setup-dialog");
+const setupCopy = $<HTMLTextAreaElement>("setup-copy");
+const setupCommand = $<HTMLInputElement>("setup-command");
+const setupPort = $<HTMLInputElement>("setup-port");
+let answerSetup: ((ok: boolean) => void) | null = null;
+
+/** Shows the repository's setup for editing; resolves the saved setup, or null when cancelled. */
+async function editSetup(main: string): Promise<WorktreeSetup | null> {
+  const s = await effectiveSetup(main);
+  setupMain = main;
+  $("setup-note").replaceChildren();
+  setupCopy.value = s.copy.join("\n");
+  setupCommand.value = s.command;
+  setupPort.value = s.basePort ? String(s.basePort) : "";
+  $("setup-error").textContent = "";
+  setupDialog.showModal();
+  setupCopy.focus();
+  const ok = await new Promise<boolean>((resolve) => (answerSetup = resolve));
+  answerSetup = null;
+  if (!ok) return null;
+  const next: WorktreeSetup = {
+    copy: parseCopyList(setupCopy.value),
+    command: setupCommand.value.trim(),
+    basePort: setupPort.value ? Number(setupPort.value) : null,
+  };
+  saveWorktreeSetup(main, next);
+  renderScripts();
+  setStatus(`Worktree setup saved for ${projectName(main)}`);
+  return next;
+}
+
+$("setup-save").addEventListener("click", () => {
+  const bad = parseCopyList(setupCopy.value).filter((p) => !validCopyPath(p));
+  const port = setupPort.value ? Number(setupPort.value) : null;
+  let error = "";
+  if (bad.length) error = `Use paths inside the repository, relative to its folder: ${bad.join(", ")}`;
+  else if (port !== null && !(Number.isInteger(port) && port > 0 && port <= 65000)) error = "The base port is a whole number from 1 to 65000.";
+  $("setup-error").textContent = error;
+  if (error) return;
+  answerSetup?.(true);
+  setupDialog.close();
+});
+$("setup-cancel").addEventListener("click", () => {
+  answerSetup?.(false);
+  setupDialog.close();
+});
+setupDialog.addEventListener("cancel", () => answerSetup?.(false));
+setupDialog.querySelector("form")!.addEventListener("submit", (e) => {
+  e.preventDefault();
+  $("setup-save").click();
+});
+
+interface SetupResult {
+  copied: string[];
+  /** Already in the worktree: not overwritten. */
+  kept: string[];
+  missing: string[];
+  /** The command started in a new window, if any. */
+  started: string | null;
+}
+
+/**
+ * Prepares the worktree `path`: copies the local files from the main work tree,
+ * then runs the command in a new window. Null when it failed (said in the status bar).
+ */
+async function runSetup(path: string, setup?: WorktreeSetup): Promise<SetupResult | null> {
+  const main = mainPath();
+  if (samePath(main, path)) {
+    setStatus("The setup copies from the main folder into the other worktrees: nothing to do here", true);
+    return null;
+  }
+  const s = setup ?? (await effectiveSetup(main));
+  const result: SetupResult = { copied: [], kept: [], missing: [], started: null };
+  const done: string[] = [];
+  try {
+    if (s.copy.length) {
+      Object.assign(result, await invoke<Omit<SetupResult, "started">>("copy_into_worktree", { from: main, to: path, paths: s.copy }));
+      done.push(`copied ${result.copied.length} file(s)${result.kept.length ? `, kept ${result.kept.length} already there` : ""}`);
+      if (result.missing.length) done.push(`not in the main folder: ${result.missing.join(", ")}`);
+    }
+    if (s.command) {
+      await invoke("launch_command", { cwd: path, command: s.command, env: envFor(path) });
+      result.started = s.command;
+      done.push(`running ${s.command} in a new window`);
+    }
+    setStatus(`Setup of ${folderName(path)}: ${done.join("; ") || "nothing to do (⚙ Worktree setup to add files or a command)"}`);
+    return result;
+  } catch (e) {
+    setStatus(`Setup of ${folderName(path)} failed: ${errorText(e)}`, true);
+    return null;
+  }
+}
+
+/** The setup in words, for the approval Claude Code's changes need. */
+function setupLines(s: WorktreeSetup): string {
+  return [
+    `• Copy from the main folder: ${s.copy.length ? s.copy.join(", ") : "nothing"}`,
+    `• Then run: ${s.command || "nothing"}`,
+    `• Base port: ${s.basePort ?? "none"}`,
+  ].join("\n");
+}
+
+// ✨ Claude suggests the setup from the repository's file names and manifests
+// (never the contents of untracked files); it fills the dialog, the user saves.
+const MANIFEST = /(^|\/)(package\.json|pnpm-workspace\.yaml|pyproject\.toml|requirements[^/]*\.txt|Pipfile|Cargo\.toml|go\.mod|Gemfile|composer\.json|\.nvmrc|\.node-version|\.tool-versions|\.gitignore)$/;
+
+let setupMain: string | null = null;
+
+function suggestSetupWithClaude() {
+  claudeAction(async () => {
+    const main = setupMain ?? mainPath();
+    const r = samePath(main, repo!.root) ? repo! : await Repo.open(main);
+    const [tracked, allUntracked] = await Promise.all([r.trackedFiles(), r.untrackedPaths()]);
+    const untracked = allUntracked.filter((p) => p !== `${DATA_DIR}/` && !p.startsWith(`${DATA_DIR}/`));
+    const names = tracked.filter((p) => MANIFEST.test(p) && !p.includes("node_modules/") && !isSecretPath(p)).slice(0, 20);
+    const read = await Promise.all(names.map(async (p) => ({ path: p, text: ((await r.readWorktree(p).catch(() => null)) ?? "").slice(0, 20_000) })));
+    const leaveOut = await screenSecrets(read);
+    if (!leaveOut) return;
+    const manifests = read.filter((m) => !leaveOut.has(m.path));
+    const port = setupPort.value ? Number(setupPort.value) : null;
+    const answer = await askClaude({
+      title: "Suggest the worktree setup with Claude?",
+      summary: `${tracked.length} tracked and ${untracked.length} untracked names (no contents), ${manifests.length} manifest file(s)`,
+      files: manifests.map((m) => m.path),
+      skipped: [...leaveOut],
+      prompt: setupPrompt({
+        tracked,
+        untracked,
+        manifests,
+        current: { copy: parseCopyList(setupCopy.value), command: setupCommand.value.trim(), basePort: port },
+      }),
+      system: SETUP_SYSTEM,
+      schema: SETUP_SCHEMA,
+    });
+    if (claudeDialog.open) claudeDialog.close();
+    if (answer === null) return;
+    const s = parseSetupSuggestion(answer, untracked);
+    setupCopy.value = s.copy.join("\n");
+    setupCommand.value = s.command;
+    setupPort.value = s.basePort ? String(s.basePort) : "";
+    $("setup-note").replaceChildren(
+      h("strong", {}, "Suggested by Claude: check it, then Save."),
+      ...(s.explanation ? [markdownBlock(s.explanation)] : []),
+    );
+  });
+}
+$("setup-suggest").addEventListener("click", suggestSetupWithClaude);
+
+/** From a branch or tag: a local branch is checked out, a remote one gets a local tracking branch. */
+function newWorktreeFor(ref: Ref) {
+  if (ref.kind === "local") return newWorktreeFlow({ branch: ref.name });
+  if (ref.kind === "remote") return newWorktreeFlow({ branch: ref.name.slice(ref.name.indexOf("/") + 1), base: ref.name });
+  return newWorktreeFlow({ branch: "", base: ref.name });
+}
 
 // ---- Stashes tab ----------------------------------------------------------
 
@@ -4502,55 +5103,91 @@ const scriptError = $("script-error");
 const scriptNpmField = $("script-npm-field");
 const scriptNpm = $<HTMLSelectElement>("script-npm");
 
+// Scripts are saved once per repository (in its main work tree's data) and run
+// in the active worktree: a saved path inside one work tree is moved to the same
+// place in the active one (worktrees.ts).
+
+/** Where a repository's scripts are saved: its main work tree. */
+const scriptHome = (root: string) => groupOf(root);
+
+/** A script and the work tree whose data holds it. */
+interface ScriptEntry {
+  s: UserScript;
+  owner: string;
+}
+
+/** The repository's scripts, then any saved in this worktree alone (before scripts were shared). */
+function scriptEntries(root: string): ScriptEntry[] {
+  const home = scriptHome(root);
+  const shared = loadScripts(home).map((s) => ({ s, owner: home }));
+  return samePath(home, root) ? shared : [...shared, ...loadScripts(root).map((s) => ({ s, owner: root }))];
+}
+
+/** Variables for scripts and setup commands in `root`: its worktree number, and a port with a base port. */
+function envFor(root: string): [string, string][] {
+  const index = Math.max(0, worktrees.findIndex((w) => samePath(w.path, root)));
+  const main = worktrees.find((w) => w.main)?.path ?? scriptHome(root);
+  return worktreeEnv(index, root, loadWorktreeSetup(main)?.basePort ?? null);
+}
+
 /** The active repository's scripts as ▶ buttons. */
 function renderScripts() {
   const box = $("script-buttons");
   const r = repo;
   if (!r) return box.replaceChildren();
   box.replaceChildren(
-    ...loadScripts(r.root).map((s) =>
+    ...scriptEntries(r.root).map((e) =>
       withContextMenu(
         h(
           "button",
           {
-            title: s.npm
-              ? `npm run ${s.npm}\nRuns in a new window, in ${s.path.replace(/[\\/]package\.json$/, "")}\nRight-click to edit or remove`
-              : `${s.path}\nRuns in a new window, in ${r.root}\nRight-click to edit or remove`,
-            onclick: () => runScript(s),
+            title: `${e.s.npm ? `npm run ${e.s.npm}` : e.s.path}\nRuns in a new window, in the worktree you are on${
+              samePath(e.owner, scriptHome(r.root)) ? "" : " (saved in this worktree only)"
+            }\nRight-click to edit or remove`,
+            onclick: () => runScript(e.s),
           },
           h("span", { class: "play" }, "▶"),
-          s.name,
+          e.s.name,
         ),
-        () => scriptMenu(s),
+        () => scriptMenu(e),
       ),
     ),
   );
 }
 
 async function runScript(s: UserScript) {
-  if (!repo) return;
+  const r = repo;
+  if (!r) return;
   try {
-    await invoke("launch_script", { cwd: repo.root, script: s.path, npm: s.npm ?? null });
-    setStatus(`Started “${s.name}” in a new window (in ${repo.name})`);
+    const roots = [...worktrees.map((w) => w.path), scriptHome(r.root), r.root];
+    let path = inWorktree(s.path, roots, r.root);
+    let note = "";
+    if (path !== s.path && !(await invoke<boolean>("is_file", { path }))) {
+      // Not in this worktree (e.g. a script Git does not track): the saved one runs, here.
+      if (s.npm) throw new Error(`this worktree has no ${path.slice(r.root.length + 1)}`);
+      note = `, using ${s.path}`;
+      path = s.path;
+    }
+    await invoke("launch_script", { cwd: r.root, script: path, npm: s.npm ?? null, env: envFor(r.root) });
+    setStatus(`Started “${s.name}” in a new window (in ${folderName(r.root)}${note})`);
   } catch (e) {
     setStatus(`Could not start “${s.name}”: ${errorText(e)}`, true);
   }
 }
 
-function updateScripts(fn: (scripts: UserScript[]) => UserScript[]) {
-  if (!repo) return;
-  saveScripts(repo.root, fn(loadScripts(repo.root)));
+function updateScripts(owner: string, fn: (scripts: UserScript[]) => UserScript[]) {
+  saveScripts(owner, fn(loadScripts(owner)));
   renderScripts();
 }
 
-function scriptMenu(s: UserScript): MenuItem[] {
+function scriptMenu({ s, owner }: ScriptEntry): MenuItem[] {
   return [
     { label: "Run", run: () => runScript(s) },
     {
       label: "Edit…",
       run: async () => {
         const edited = await scriptDialogFor(s);
-        if (edited) updateScripts((list) => list.map((x) => (x.id === s.id ? edited : x)));
+        if (edited) updateScripts(owner, (list) => list.map((x) => (x.id === s.id ? edited : x)));
       },
     },
     { label: "Copy path", run: () => navigator.clipboard.writeText(s.path) },
@@ -4559,7 +5196,7 @@ function scriptMenu(s: UserScript): MenuItem[] {
       label: "Remove…",
       run: async () => {
         if (await confirmAction(`Remove the script “${s.name}” from this repository? The file itself is not deleted.`))
-          updateScripts((list) => list.filter((x) => x.id !== s.id));
+          updateScripts(owner, (list) => list.filter((x) => x.id !== s.id));
       },
     },
   ];
@@ -4685,7 +5322,7 @@ $("qa-copy-path").addEventListener("click", async () => {
 
 $("add-script").addEventListener("click", async () => {
   const s = await scriptDialogFor();
-  if (s) updateScripts((list) => [...list, s]);
+  if (s && repo) updateScripts(scriptHome(repo.root), (list) => [...list, s]);
 });
 
 // ---- projects picker ------------------------------------------------------
@@ -5396,6 +6033,7 @@ function moreMenu(): MenuItem[] {
     { label: "Add remote…", run: () => addRemoteFlow().catch(showError) },
     { label: "Sign in…", run: () => signIn().catch(showError) },
     { label: "New branch…", run: newBranch },
+    { label: "New worktree…", run: () => newWorktreeFlow().catch(showError) },
     { label: "New tag…", run: newTag },
     { label: "Stash changes…", run: () => stashChanges(false) },
     { label: "Stash including untracked…", run: () => stashChanges(true) },
@@ -5515,7 +6153,7 @@ setRepoStoreCreatedHandler((root) => {
 
 /** Loads every open tab's .hunkpad data (for colours), then redraws the tabs. */
 function loadTabsData() {
-  Promise.all(openTabs.map((p) => loadRepoData(p).catch(() => null)))
+  Promise.all([...new Set([...openTabs, ...openTabs.map(groupOf)])].map((p) => loadRepoData(p).catch(() => null)))
     .then(() => renderTabs())
     .catch(showError);
 }
@@ -5659,6 +6297,14 @@ const mcpHost: McpHost = {
             ahead: status?.ahead ?? 0,
             behind: status?.behind ?? 0,
             inProgress: status?.operation ?? null,
+            worktrees: worktrees.map((w) => ({
+              path: w.path,
+              branch: w.branch,
+              main: w.main,
+              current: samePath(w.path, r.root),
+              ...(w.locked !== null ? { locked: true } : {}),
+              ...(w.prunable ? { folderMissing: true } : {}),
+            })),
           }
         : null,
       openRepos: openTabs,
@@ -5678,9 +6324,65 @@ const mcpHost: McpHost = {
     };
   },
 
+  async worktreeSetup() {
+    needRepo();
+    const main = mainPath();
+    await loadRepoData(main).catch(() => null);
+    return {
+      repo: main,
+      saved: !!loadWorktreeSetup(main),
+      setup: await effectiveSetup(main),
+      worktrees: worktrees.map((w, i) => ({ path: w.path, branch: w.branch, number: i, main: w.main })),
+    };
+  },
+
+  async setWorktreeSetup(change) {
+    needRepo();
+    const main = mainPath();
+    const cur = await effectiveSetup(main);
+    const copy = change.copy ? parseCopyList(change.copy.join("\n")) : cur.copy;
+    const bad = copy.filter((p) => !validCopyPath(p));
+    if (bad.length) throw new ToolError(`not repo-relative paths: ${bad.join(", ")}`);
+    if (change.command !== undefined && /[\r\n]/.test(change.command)) throw new ToolError("command must be one line");
+    const next: WorktreeSetup = {
+      copy,
+      command: change.command?.trim() ?? cur.command,
+      basePort: change.basePort === undefined ? cur.basePort : change.basePort,
+    };
+    const ok = await ask(`Claude Code wants to change the worktree setup of ${projectName(main)}:\n\n${setupLines(next)}`, {
+      title: "Hunkpad",
+      okLabel: "Save",
+      cancelLabel: "Decline",
+    });
+    if (!ok) return "cancelled";
+    saveWorktreeSetup(main, next);
+    renderScripts();
+    setStatus(`Worktree setup of ${projectName(main)} changed by Claude Code`);
+    return "done";
+  },
+
+  async runWorktreeSetup(path) {
+    needRepo();
+    const same = (p: string) => samePath(p, path.replace(/\\/g, "/")) || samePath(p, path);
+    const w = worktrees.find((x) => same(x.path));
+    if (!w) throw new ToolError(`Not a worktree of the active repository: ${path}`);
+    if (w.main) throw new ToolError("That is the main folder: the setup copies from it into the other worktrees");
+    if (w.prunable) throw new ToolError(`The folder of this worktree is gone: ${w.path}`);
+    const s = await effectiveSetup(mainPath());
+    const ok = await ask(`Claude Code wants to set up the worktree ${w.path}:\n\n${setupLines(s)}\n\nExisting files are never overwritten.`, {
+      title: "Hunkpad",
+      okLabel: "Set it up",
+      cancelLabel: "Decline",
+    });
+    if (!ok) return { outcome: "cancelled" };
+    const result = await runSetup(w.path, s);
+    return result ? { outcome: "done", ...result } : { outcome: "failed" };
+  },
+
   async switchRepo(root) {
-    const tab = openTabs.find((t) => samePath(t, root.replace(/\\/g, "/")) || samePath(t, root));
-    if (!tab) throw new ToolError(`Not an open tab: ${root}. Open tabs: ${openTabs.join(", ") || "none"}`);
+    const same = (p: string) => samePath(p, root.replace(/\\/g, "/")) || samePath(p, root);
+    const tab = openTabs.find(same) ?? worktrees.find((w) => same(w.path) && !w.prunable)?.path;
+    if (!tab) throw new ToolError(`Not an open tab or a worktree of the active repository: ${root}. Open tabs: ${openTabs.join(", ") || "none"}`);
     await openRepo(tab);
   },
 

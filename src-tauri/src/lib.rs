@@ -392,10 +392,45 @@ fn initial_repo() -> Option<String> {
     std::env::args().nth(1)
 }
 
-/// Inside `.git`, only files that change what we display are worth a refresh.
-/// `.hunkpad` (Hunkpad's own data, ignored by Git) never is: saving it must
-/// not trigger a refresh that saves it again.
-fn is_relevant(path: &Path) -> bool {
+/// The folders behind the open work tree. In the main work tree the Git
+/// folder is `.git` inside it; in a linked worktree (`git worktree add`) its
+/// own state (index, HEAD) is in `<common>/worktrees/<name>`, and the refs it
+/// shares with the other worktrees are in the common folder, both outside it.
+struct Watched {
+    work: PathBuf,
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+}
+
+/// Components of `path` below `dir`, or `None` when it is not inside `dir`.
+fn below(path: &Path, dir: &Path) -> Option<Vec<String>> {
+    let rest = path.strip_prefix(dir).ok()?;
+    Some(rest.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect())
+}
+
+/// Only Git files that change what we display are worth a refresh: this work
+/// tree's index, HEAD and operation state, and the shared refs (not another
+/// worktree's index). `.hunkpad` (Hunkpad's own data, ignored by Git) never is:
+/// saving it must not trigger a refresh that saves it again.
+fn is_relevant(w: &Watched, path: &Path) -> bool {
+    if let Some(inside) = below(path, &w.git_dir) {
+        let first = inside.first().map(String::as_str);
+        if matches!(first, Some("index" | "HEAD" | "MERGE_HEAD" | "rebase-merge" | "rebase-apply")) {
+            return true;
+        }
+        // In the main work tree, refs are in its own Git folder too.
+        if w.git_dir != w.common_dir {
+            return false;
+        }
+    }
+    if let Some(inside) = below(path, &w.common_dir) {
+        return matches!(inside.first().map(String::as_str), Some("refs" | "packed-refs"));
+    }
+    path.starts_with(&w.work) && is_relevant_in_work_tree(path)
+}
+
+/// A work-tree path; a nested repository's `.git` counts only for its state files.
+fn is_relevant_in_work_tree(path: &Path) -> bool {
     let parts: Vec<String> = path
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
@@ -431,20 +466,44 @@ fn watch_error(e: &str) -> String {
 }
 
 /// Watches the repository and emits `repo-changed` (debounced) on changes.
+/// `git_dir` and `common_dir` come from `git rev-parse --git-dir --git-common-dir`
+/// (absolute); without them the Git folder is taken to be `<repo>/.git`.
 #[tauri::command]
-fn watch_repo(app: AppHandle, state: State<'_, WatchState>, repo: String) -> Result<(), String> {
+fn watch_repo(
+    app: AppHandle,
+    state: State<'_, WatchState>,
+    repo: String,
+    git_dir: Option<String>,
+    common_dir: Option<String>,
+) -> Result<(), String> {
+    // Real paths, so they compare equal to the paths in the events.
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let work = real(Path::new(&repo));
+    let git_dir = real(&git_dir.map(PathBuf::from).unwrap_or_else(|| Path::new(&repo).join(".git")));
+    let common_dir = common_dir.map(|d| real(Path::new(&d))).unwrap_or_else(|| git_dir.clone());
+    // A linked worktree's Git folders are outside it: watch them too (the
+    // worktree's own folder is normally inside the common one).
+    let mut roots = vec![work.clone()];
+    for dir in [&common_dir, &git_dir] {
+        if !roots.iter().any(|r| dir.starts_with(r)) {
+            roots.push(dir.clone());
+        }
+    }
+    let watched = Watched { work, git_dir, common_dir };
     let mut debouncer = new_debouncer(Duration::from_millis(300), move |res: DebounceEventResult| {
         if let Ok(events) = res {
-            if events.iter().any(|e| is_relevant(&e.path)) {
+            if events.iter().any(|e| is_relevant(&watched, &e.path)) {
                 let _ = app.emit("repo-changed", ());
             }
         }
     })
     .map_err(|e| e.to_string())?;
-    debouncer
-        .watcher()
-        .watch(Path::new(&repo), RecursiveMode::Recursive)
-        .map_err(|e| watch_error(&e.to_string()))?;
+    for root in &roots {
+        debouncer
+            .watcher()
+            .watch(root, RecursiveMode::Recursive)
+            .map_err(|e| watch_error(&e.to_string()))?;
+    }
     // Replacing the previous debouncer drops it, which stops the old watch.
     *lock(&state.0) = Some(debouncer);
     Ok(())
@@ -628,17 +687,48 @@ fn launch_outside_job(cwd: &str, commands: &str) -> Result<(), String> {
         .map_err(|e| format!("could not start {}: {e}", launcher.display()))
 }
 
+/// Environment variables for a script or command (e.g. which worktree it runs in).
+type Env = Vec<(String, String)>;
+
+/// Names are plain identifiers; values stay on one line and, for cmd, without quotes.
+fn check_env(env: &Env) -> Result<(), String> {
+    for (name, value) in env {
+        let ok_name = !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !ok_name || value.contains(['\n', '\r', '"', '\0']) {
+            return Err(format!("unsupported environment variable: {name}"));
+        }
+    }
+    Ok(())
+}
+
+/// `run` preceded by `export NAME='value'` for each variable (bash).
+#[cfg(not(windows))]
+fn with_env(env: &Env, run: &str) -> String {
+    let exports: String = env.iter().map(|(k, v)| format!("export {k}={}\n", platform::quote(v))).collect();
+    format!("{exports}{run}")
+}
+
+/// `set "NAME=value"` lines for a batch launcher (see launch_outside_job).
+#[cfg(windows)]
+fn env_lines(env: &Env) -> String {
+    env.iter().map(|(k, v)| format!("set \"{k}={v}\"\r\n")).collect()
+}
+
 /// Starts a user script in a new console (Windows) or terminal window, in `cwd`
 /// (the repository). The window stays open afterwards so its output can be read.
 /// With `npm`, `script` is a package.json and `npm run <npm>` runs in its folder.
 #[tauri::command]
-fn launch_script(cwd: String, script: String, npm: Option<String>) -> Result<(), String> {
+fn launch_script(cwd: String, script: String, npm: Option<String>, env: Option<Env>) -> Result<(), String> {
+    let env = env.unwrap_or_default();
+    check_env(&env)?;
     let path = Path::new(&script);
     if !path.is_file() {
         return Err(format!("script not found: {script}"));
     }
     if let Some(name) = npm {
-        return launch_npm_script(path, &name);
+        return launch_npm_script(path, &name, &env);
     }
     let ext = path
         .extension()
@@ -652,7 +742,10 @@ fn launch_script(cwd: String, script: String, npm: Option<String>) -> Result<(),
         const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
         let quoted = |s: &str| format!("\"{s}\"");
         if ext == "ps1" && in_killing_job() {
-            return launch_outside_job(&cwd, &format!("powershell.exe -NoExit -NoProfile -ExecutionPolicy Bypass -File {}", quoted(&script)));
+            return launch_outside_job(
+                &cwd,
+                &format!("{}powershell.exe -NoExit -NoProfile -ExecutionPolicy Bypass -File {}", env_lines(&env), quoted(&script)),
+            );
         }
         let mut cmd = if ext == "ps1" {
             let mut c = Command::new("powershell.exe");
@@ -671,25 +764,26 @@ fn launch_script(cwd: String, script: String, npm: Option<String>) -> Result<(),
                 _ => quoted(&script), // .cmd, .bat, .exe and anything with a file association
             };
             if in_killing_job() {
-                return launch_outside_job(&cwd, &format!("cmd /k \"{line}\""));
+                return launch_outside_job(&cwd, &format!("{}cmd /k \"{line}\"", env_lines(&env)));
             }
             let mut c = Command::new("cmd.exe");
             c.raw_arg(format!("/k \"{line}\""));
             c
         };
         cmd.current_dir(&cwd)
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .creation_flags(CREATE_NEW_CONSOLE)
             .spawn()
             .map_err(|e| format!("could not start {script}: {e}"))?;
         Ok(())
     }
     #[cfg(not(windows))]
-    platform::launch_in_terminal(&cwd, &platform::script_command(path, &ext)?)
+    platform::launch_in_terminal(&cwd, &with_env(&env, &platform::script_command(path, &ext)?))
 }
 
 /// `npm run <name>` in a new console or terminal window, in the folder of
 /// `package_json`.
-fn launch_npm_script(package_json: &Path, name: &str) -> Result<(), String> {
+fn launch_npm_script(package_json: &Path, name: &str, env: &Env) -> Result<(), String> {
     if !is_package_json(package_json) {
         return Err(format!("not a package.json: {}", package_json.display()));
     }
@@ -703,19 +797,108 @@ fn launch_npm_script(package_json: &Path, name: &str) -> Result<(), String> {
             return Err(format!("unsupported npm script name: {name}"));
         }
         if in_killing_job() {
-            return launch_outside_job(&dir.to_string_lossy(), &format!("cmd /k \"npm run \"{name}\"\""));
+            return launch_outside_job(&dir.to_string_lossy(), &format!("{}cmd /k \"npm run \"{name}\"\"", env_lines(env)));
         }
         // Same outer quotes as launch_script: cmd strips them, the name keeps its own.
         Command::new("cmd.exe")
             .raw_arg(format!("/k \"npm run \"{name}\"\""))
             .current_dir(dir)
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .creation_flags(CREATE_NEW_CONSOLE)
             .spawn()
             .map_err(|e| format!("could not start npm run {name}: {e}"))?;
         Ok(())
     }
     #[cfg(not(windows))]
-    platform::launch_in_terminal(&dir.to_string_lossy(), &format!("npm run {}", platform::quote(name)))
+    platform::launch_in_terminal(&dir.to_string_lossy(), &with_env(env, &format!("npm run {}", platform::quote(name))))
+}
+
+/// Runs a command line the user wrote (e.g. a worktree's setup, `pnpm install`)
+/// in a new console or terminal window, in `cwd`: cmd on Windows, bash elsewhere.
+#[tauri::command]
+fn launch_command(cwd: String, command: String, env: Option<Env>) -> Result<(), String> {
+    let env = env.unwrap_or_default();
+    check_env(&env)?;
+    if !Path::new(&cwd).is_dir() {
+        return Err(format!("folder not found: {cwd}"));
+    }
+    if command.trim().is_empty() || command.contains(['\n', '\r']) {
+        return Err("the command must be one line".into());
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        if in_killing_job() {
+            return launch_outside_job(&cwd, &format!("{}cmd /k \"{command}\"", env_lines(&env)));
+        }
+        Command::new("cmd.exe")
+            .raw_arg(format!("/k \"{command}\""))
+            .current_dir(&cwd)
+            .envs(env.iter().map(|(k, v)| (k, v)))
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .spawn()
+            .map_err(|e| format!("could not start {command}: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    platform::launch_in_terminal(&cwd, &with_env(&env, &command))
+}
+
+/// What `copy_into_worktree` did, by repo-relative path.
+#[derive(Serialize)]
+struct CopyReport {
+    copied: Vec<String>,
+    /// Already there: never overwritten.
+    kept: Vec<String>,
+    /// Not in the source folder.
+    missing: Vec<String>,
+}
+
+/// Copies files or folders that Git does not track (e.g. `.env`, local config)
+/// from one work tree of a repository to another, at the same relative paths.
+/// Existing files are never overwritten; symbolic links are skipped.
+#[tauri::command]
+async fn copy_into_worktree(from: String, to: String, paths: Vec<String>) -> Result<CopyReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut report = CopyReport { copied: Vec::new(), kept: Vec::new(), missing: Vec::new() };
+        for p in &paths {
+            let src = safe_join(&from, p)?;
+            let dst = safe_join(&to, p)?;
+            if !src.exists() {
+                report.missing.push(p.clone());
+                continue;
+            }
+            copy_tree(&src, &dst, p, &mut report)?;
+        }
+        Ok(report)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn copy_tree(src: &Path, dst: &Path, rel: &str, report: &mut CopyReport) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    if meta.is_dir() {
+        std::fs::create_dir_all(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+        let entries = std::fs::read_dir(src).map_err(|e| format!("{}: {e}", src.display()))?;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            copy_tree(&entry.path(), &dst.join(&name), &format!("{rel}/{name}"), report)?;
+        }
+    } else if meta.is_file() {
+        if dst.exists() {
+            report.kept.push(rel.to_string());
+            return Ok(());
+        }
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        std::fs::copy(src, dst).map_err(|e| format!("{}: {e}", src.display()))?;
+        report.copied.push(rel.to_string());
+    }
+    Ok(())
 }
 
 /// An interactive shell in a new window, in `cwd`: Windows Terminal when it is
@@ -814,6 +997,8 @@ pub fn run() {
             remove_temp_index,
             is_file,
             launch_script,
+            launch_command,
+            copy_into_worktree,
             open_terminal,
             read_image,
             open_link,
@@ -836,4 +1021,47 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hunkpad");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn watched(work: &str, git_dir: &str, common_dir: &str) -> Watched {
+        Watched { work: work.into(), git_dir: git_dir.into(), common_dir: common_dir.into() }
+    }
+
+    #[test]
+    fn main_work_tree() {
+        let w = watched("/r", "/r/.git", "/r/.git");
+        for p in ["/r/src/a.ts", "/r/.git/index", "/r/.git/HEAD", "/r/.git/refs/heads/main", "/r/.git/packed-refs"] {
+            assert!(is_relevant(&w, Path::new(p)), "{p}");
+        }
+        // Another worktree's state, objects, and Hunkpad's own data are not.
+        for p in ["/r/.git/worktrees/wt/index", "/r/.git/objects/ab/cd", "/r/.hunkpad/state.json", "/elsewhere/x"] {
+            assert!(!is_relevant(&w, Path::new(p)), "{p}");
+        }
+    }
+
+    #[test]
+    fn script_env() {
+        let env = |pairs: &[(&str, &str)]| -> Env { pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect() };
+        assert!(check_env(&env(&[("HUNKPAD_WORKTREE", "1"), ("PORT", "3001")])).is_ok());
+        for bad in [env(&[("1X", "a")]), env(&[("A-B", "a")]), env(&[("A", "x\ny")]), env(&[("A", "say \"hi\"")])] {
+            assert!(check_env(&bad).is_err());
+        }
+        #[cfg(not(windows))]
+        assert_eq!(with_env(&env(&[("P", "it's")]), "npm run dev"), "export P='it'\\''s'\nnpm run dev");
+    }
+
+    #[test]
+    fn linked_worktree() {
+        let w = watched("/wt", "/r/.git/worktrees/wt", "/r/.git");
+        for p in ["/wt/src/a.ts", "/r/.git/worktrees/wt/index", "/r/.git/worktrees/wt/HEAD", "/r/.git/refs/heads/feature"] {
+            assert!(is_relevant(&w, Path::new(p)), "{p}");
+        }
+        for p in ["/r/.git/index", "/r/.git/HEAD", "/r/.git/worktrees/other/index", "/r/src/a.ts", "/wt/.hunkpad/x"] {
+            assert!(!is_relevant(&w, Path::new(p)), "{p}");
+        }
+    }
 }

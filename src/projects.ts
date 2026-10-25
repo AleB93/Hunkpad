@@ -4,7 +4,7 @@
 // the functions for it below keep their names but read and write that store.
 import type { HunkAssignment } from "./hunks";
 import { samePath } from "./platform";
-import { repoData, updateRepoData } from "./repoStore";
+import { WorktreeSetup, repoData, updateRepoData } from "./repoStore";
 import { settings } from "./settings";
 
 export interface Project {
@@ -277,4 +277,15 @@ export function loadScripts(repo: string): UserScript[] {
 
 export function saveScripts(repo: string, scripts: UserScript[]) {
   updateRepoData(repo, (d) => (d.scripts = copy(scripts)));
+}
+
+// ---- worktree setup (per repository, in the main work tree's data) -----------
+
+export function loadWorktreeSetup(repo: string): WorktreeSetup | null {
+  const s = repoData(repo).worktreeSetup;
+  return s ? copy(s) : null;
+}
+
+export function saveWorktreeSetup(repo: string, setup: WorktreeSetup) {
+  updateRepoData(repo, (d) => (d.worktreeSetup = copy(setup)));
 }

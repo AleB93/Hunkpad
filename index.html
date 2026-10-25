@@ -52,6 +52,13 @@
       <div id="repo-tabs"></div>
       <button id="add-tab" title="Open a saved project in a new tab (Ctrl+R)">+</button>
     </div>
+    <!-- The active repository's worktrees, when it has linked ones: switches between them (main.ts). -->
+    <div id="worktree-bar" class="repo-only hidden">
+      <span class="small muted" title="Folders of this repository, each with its own branch (git worktree)">Worktree</span>
+      <div id="worktree-tabs"></div>
+      <button id="add-worktree" title="New worktree…">+</button>
+      <button id="worktree-setup-btn" title="Worktree setup: files to copy and a command to run in each new worktree">⚙ Setup</button>
+    </div>
     <!-- Built-in one-click actions on the active repository. -->
     <div id="quickbar" class="repo-only">
       <span class="small muted">Quick</span>
@@ -258,6 +265,57 @@
         <div class="row end">
           <button id="remote-cancel" type="button">Cancel</button>
           <button id="remote-save" type="button" class="primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- New linked worktree: another folder with its own branch (main.ts, git worktree add). -->
+    <dialog id="worktree-dialog">
+      <form method="dialog" novalidate>
+        <strong>New worktree</strong>
+        <p class="small muted">A second folder of this repository with another branch checked out, so you can work on both at once.</p>
+        <label class="field">Branch <input id="worktree-branch" placeholder="new or existing branch; empty = detached" autocomplete="off" spellcheck="false" /></label>
+        <label class="field">From <input id="worktree-base" placeholder="HEAD" autocomplete="off" spellcheck="false" /></label>
+        <label class="field">Folder
+          <span class="row"><input id="worktree-path" autocomplete="off" spellcheck="false" /><button id="worktree-browse" type="button">Browse…</button></span>
+        </label>
+        <label class="small"><input type="checkbox" id="worktree-open" checked /> Open it in a new tab</label>
+        <div class="row small">
+          <label><input type="checkbox" id="worktree-setup" checked /> Set it up: <span id="worktree-setup-summary"></span></label>
+          <button id="worktree-setup-edit" type="button" class="link">Change…</button>
+        </div>
+        <div id="worktree-plan" class="small muted"></div>
+        <div id="worktree-error" class="small err"></div>
+        <div class="row end">
+          <button id="worktree-cancel" type="button">Cancel</button>
+          <button id="worktree-create" type="button" class="primary">Create</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- How each new worktree of a repository is prepared (main.ts; saved in the main work tree's .hunkpad). -->
+    <dialog id="setup-dialog">
+      <form method="dialog" novalidate>
+        <strong>Worktree setup</strong>
+        <p class="small muted">Git only puts committed files in a new worktree. This prepares it so the code runs: done for every new worktree, or with Run setup on one.</p>
+        <label class="field">Copy from the main folder (one path per line: files or folders Git does not track, e.g. .env)
+          <textarea id="setup-copy" rows="4" spellcheck="false"></textarea>
+        </label>
+        <label class="field">Then run, in the new worktree
+          <input id="setup-command" placeholder="pnpm install" autocomplete="off" spellcheck="false" />
+        </label>
+        <p class="small muted">pnpm keeps each package once on disk and links it into every worktree's node_modules, so installs are fast and small.</p>
+        <label class="field">Base port (optional)
+          <input id="setup-port" type="number" min="1" max="65000" placeholder="e.g. 3000" />
+        </label>
+        <p class="small muted">Scripts get HUNKPAD_WORKTREE (0 = main folder, 1, 2… = the others) and, with a base port, PORT = base + that number, so dev servers of two worktrees do not collide.</p>
+        <div id="setup-note" class="small"></div>
+        <div id="setup-error" class="small err"></div>
+        <div class="row end">
+          <button id="setup-suggest" type="button" title="Claude looks at the file names and manifests (package.json…) and fills this in; you check it and Save">✨ Suggest with Claude</button>
+          <span class="spacer"></span>
+          <button id="setup-cancel" type="button">Cancel</button>
+          <button id="setup-save" type="button" class="primary">Save</button>
         </div>
       </form>
     </dialog>

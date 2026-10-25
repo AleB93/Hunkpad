@@ -13,6 +13,27 @@ All notable changes to Hunkpad are listed here. The format follows
   groups, review changes as comments, describe a branch for a pull request,
   explain a commit, and suggest merge-conflict resolutions. Every request is
   shown before it is sent; Kept local and secret-looking files are never sent.
+- Git worktrees: the Branches tab lists the repository's worktrees; create one
+  (new or existing branch, or detached) from there, from a branch, tag or
+  commit, or from ⋯ → New worktree…; open, lock, move, remove and prune them. A branch checked out in another worktree
+  opens that worktree instead. Claude Code sees the worktrees over MCP and can
+  switch to one. A repository's worktrees share its tab: the Worktree bar under
+  the tabs switches between them.
+- Worktree setup (⚙ Setup): files Git does not track (e.g. .env) are copied
+  from the main folder into each new worktree, then a command runs there
+  (pnpm install by default for a Node project). Run setup also works on
+  worktrees made elsewhere (e.g. by Claude Code). ✨ Suggest with Claude fills
+  it in from the repository's file names and manifests (no untracked file
+  contents are sent); Claude Code can read, change and run it over MCP, each
+  change approved in Hunkpad.
+- Scripts are shared by all of a repository's worktrees and run in the one you
+  are on, with HUNKPAD_WORKTREE (its number) and, with a base port, PORT set so
+  two dev servers do not collide.
+
+### Fixed
+
+- A linked worktree now refreshes when it is staged, committed or checked out
+  from a terminal (its index and HEAD live outside its folder).
 
 ## [0.2.0] - 2026-10-16
 

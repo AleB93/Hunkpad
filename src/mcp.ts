@@ -23,6 +23,9 @@ export interface McpHost {
   openFile(path: string, line: number | undefined): Promise<void>;
   stageGroup(id: string): Promise<Outcome>;
   commitGroup(id: string, message: string | undefined): Promise<Outcome>;
+  worktreeSetup(): Promise<unknown>;
+  setWorktreeSetup(change: { copy?: string[]; command?: string; basePort?: number | null }): Promise<Outcome>;
+  runWorktreeSetup(worktree: string): Promise<{ outcome: Outcome } & Record<string, unknown>>;
 }
 
 /** A tool's input is wrong, or what it names does not exist: reported to Claude as a tool error. */
@@ -42,15 +45,17 @@ export const TOOLS = [
     name: "hunkpad_get_view",
     description:
       "What the user is looking at in Hunkpad right now: the active repository (branch, upstream, ahead/behind, " +
-      "merge/rebase in progress), the other open repository tabs, the side tab, the open file and diff, and the " +
+      "merge/rebase in progress, its git worktrees), the other open repository tabs, the side tab, the open file and diff, and the " +
       "cursor line and selected text in it.",
     inputSchema: obj({}),
     annotations: { readOnlyHint: true },
   },
   {
     name: "hunkpad_switch_repo",
-    description: "Make another open repository tab the active one (every other tool acts on the active tab).",
-    inputSchema: obj({ root: str("Repository root, as listed in hunkpad_get_view.openRepos.") }, ["root"]),
+    description:
+      "Make another open repository tab, or another worktree of the active repository, the active one (every " +
+      "other tool acts on the active tab). A worktree that is not open yet opens in a new tab.",
+    inputSchema: obj({ root: str("Repository root, as listed in hunkpad_get_view.openRepos or repo.worktrees[].path.") }, ["root"]),
   },
   {
     name: "hunkpad_list_changes",
@@ -141,6 +146,34 @@ export const TOOLS = [
       "Commit exactly one change group's blocks (other changes stay uncommitted). Hunkpad shows the Git command " +
       "to the user, who may decline. Uses the message given, else the group's suggested message.",
     inputSchema: obj({ groupId: str("Group id."), message: str("Commit message.") }, ["groupId"]),
+  },
+  {
+    name: "hunkpad_get_worktree_setup",
+    description:
+      "How the active repository prepares a new git worktree so its code runs: the untracked files copied from " +
+      "the main folder (e.g. .env.local), the command run in the new worktree (e.g. pnpm install), and the base " +
+      "port (scripts get PORT = basePort + the worktree's number, and HUNKPAD_WORKTREE = that number). Also lists " +
+      "the worktrees with their numbers. saved=false means these are Hunkpad's suggested defaults.",
+    inputSchema: obj({}),
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "hunkpad_set_worktree_setup",
+    description:
+      "Change the active repository's worktree setup; fields left out keep their current value. The user " +
+      "approves the change in Hunkpad. For Node.js dependencies use pnpm (pnpm install).",
+    inputSchema: obj({
+      copy: { type: "array", items: { type: "string" }, description: "Repo-relative files or folders Git does not track, copied from the main folder." },
+      command: str("One command line run in the new worktree; empty for none."),
+      basePort: { type: ["integer", "null"], description: "Base port, or null for none." },
+    }),
+  },
+  {
+    name: "hunkpad_run_worktree_setup",
+    description:
+      "Set up an existing worktree of the active repository with its worktree setup: copies the files from the " +
+      "main folder (never overwriting) and starts the command in a new terminal window. The user approves it in Hunkpad.",
+    inputSchema: obj({ worktree: str("The worktree's path, as listed by hunkpad_get_worktree_setup.") }, ["worktree"]),
   },
 ] as const;
 
@@ -235,6 +268,29 @@ async function callTool(host: McpHost, name: string, args: Args): Promise<unknow
       return { outcome: outcomeText[await host.stageGroup(needString(args, "groupId"))] };
     case "hunkpad_commit_group":
       return { outcome: outcomeText[await host.commitGroup(needString(args, "groupId"), optString(args, "message"))] };
+    case "hunkpad_get_worktree_setup":
+      return host.worktreeSetup();
+    case "hunkpad_set_worktree_setup": {
+      const change: { copy?: string[]; command?: string; basePort?: number | null } = {};
+      if (args.copy !== undefined) {
+        if (!Array.isArray(args.copy) || args.copy.some((p) => typeof p !== "string")) throw new ToolError("copy must be a list of paths");
+        change.copy = args.copy as string[];
+      }
+      const command = optString(args, "command");
+      if (command !== undefined) change.command = command;
+      if (args.basePort !== undefined) {
+        const p = args.basePort;
+        if (p !== null && !(typeof p === "number" && Number.isInteger(p) && p > 0 && p <= 65000))
+          throw new ToolError("basePort must be a whole number from 1 to 65000, or null");
+        change.basePort = p as number | null;
+      }
+      if (!Object.keys(change).length) throw new ToolError("give copy, command or basePort");
+      return { outcome: outcomeText[await host.setWorktreeSetup(change)] };
+    }
+    case "hunkpad_run_worktree_setup": {
+      const { outcome, ...rest } = await host.runWorktreeSetup(needString(args, "worktree"));
+      return { outcome: outcomeText[outcome], ...rest };
+    }
     default:
       throw new ToolError(`unknown tool: ${name}`);
   }

@@ -32,6 +32,17 @@ export interface RepoData {
   scripts: UserScript[];
   /** Review comments on lines (comments.ts). */
   comments: ReviewComment[];
+  /** How new worktrees are prepared (kept in the main work tree's data); null = the defaults. */
+  worktreeSetup: WorktreeSetup | null;
+}
+
+export interface WorktreeSetup {
+  /** Repo-relative files or folders copied from the main work tree. */
+  copy: string[];
+  /** Command line run in the new worktree, e.g. `pnpm install`; "" for none. */
+  command: string;
+  /** Scripts get PORT = basePort + the worktree's number. */
+  basePort: number | null;
 }
 
 const empty = (): RepoData => ({
@@ -43,6 +54,7 @@ const empty = (): RepoData => ({
   keptLocal: [],
   scripts: [],
   comments: [],
+  worktreeSetup: null,
 });
 const EMPTY_JSON = JSON.stringify(empty());
 
@@ -94,7 +106,15 @@ function normalize(raw: unknown): RepoData {
       v.comments,
       (c) => typeof (c as ReviewComment)?.path === "string" && typeof (c as ReviewComment)?.text === "string",
     ),
+    worktreeSetup: setupFrom(v.worktreeSetup),
   };
+}
+
+function setupFrom(raw: unknown): WorktreeSetup | null {
+  if (!raw || typeof raw !== "object") return null;
+  const v = raw as Record<string, unknown>;
+  const port = typeof v.basePort === "number" && Number.isInteger(v.basePort) && v.basePort > 0 ? v.basePort : null;
+  return { copy: arr<string>(v.copy, (x) => typeof x === "string"), command: typeof v.command === "string" ? v.command : "", basePort: port };
 }
 
 function readLocal(k: string): unknown {

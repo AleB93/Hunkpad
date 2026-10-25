@@ -218,6 +218,43 @@ export interface Remote {
   pushUrl: string;
 }
 
+/** A work tree of the repository (`git worktree list`): the main one or a linked one. */
+export interface Worktree {
+  path: string;
+  /** Short branch name; null when detached (or bare). */
+  branch: string | null;
+  sha: string;
+  /** The main work tree (the first listed), which cannot be removed. */
+  main: boolean;
+  bare: boolean;
+  /** Locked against pruning and removal; the reason, or "" when none was given. */
+  locked: string | null;
+  /** Its folder is gone: `git worktree prune` would drop it. */
+  prunable: boolean;
+}
+
+/** Parses `git worktree list --porcelain`. */
+export function parseWorktrees(out: string): Worktree[] {
+  const list: Worktree[] = [];
+  for (const record of out.replace(/\r\n/g, "\n").split(/\n\n+/)) {
+    const lines = record.split("\n").filter(Boolean);
+    if (!lines[0]?.startsWith("worktree ")) continue;
+    const wt: Worktree = { path: "", branch: null, sha: "", main: !list.length, bare: false, locked: null, prunable: false };
+    for (const line of lines) {
+      const sp = line.indexOf(" ");
+      const [key, value] = sp < 0 ? [line, ""] : [line.slice(0, sp), line.slice(sp + 1)];
+      if (key === "worktree") wt.path = value;
+      else if (key === "HEAD") wt.sha = value;
+      else if (key === "branch") wt.branch = value.replace(/^refs\/heads\//, "");
+      else if (key === "bare") wt.bare = true;
+      else if (key === "locked") wt.locked = value;
+      else if (key === "prunable") wt.prunable = true;
+    }
+    list.push(wt);
+  }
+  return list;
+}
+
 /** Where an HTTPS remote signs in: what Git's credential helpers key a login by. */
 export interface CredentialTarget {
   protocol: string;
@@ -705,6 +742,58 @@ export class Repo {
     await this.git(["push", remoteRef.slice(0, slash), "--delete", remoteRef.slice(slash + 1)]);
   }
 
+  // ---- worktrees ---------------------------------------------------------
+
+  async worktrees(): Promise<Worktree[]> {
+    return parseWorktrees(await this.read(["worktree", "list", "--porcelain"], true));
+  }
+
+  /**
+   * This work tree's own Git folder and the folder shared by all worktrees
+   * (the same one, except in a linked worktree); null with a Git older than 2.31.
+   */
+  async gitDirs(): Promise<{ gitDir: string; commonDir: string } | null> {
+    const out = await this.read(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], true);
+    const [gitDir, commonDir] = out.split("\n").map((l) => l.trim());
+    return gitDir && commonDir ? { gitDir, commonDir } : null;
+  }
+
+  /**
+   * A new work tree in `path` (a folder that does not exist yet or is empty):
+   * on `newBranch` created from `ref` (HEAD if none), on the existing local
+   * branch `ref`, or detached at `ref`. A remote branch gets a local tracking branch.
+   */
+  async addWorktree(path: string, opts: { ref?: string; newBranch?: string; detach?: boolean; track?: boolean }) {
+    const { ref, newBranch, detach, track } = opts;
+    const args = ["worktree", "add"];
+    if (newBranch) args.push(...(track ? ["--track"] : []), "-b", newBranch);
+    else if (detach) args.push("--detach");
+    args.push(path, ...(ref ? [ref] : []));
+    await this.git(args);
+  }
+
+  /** `force`: also when it has uncommitted changes or untracked files, which are lost. */
+  async removeWorktree(path: string, force: boolean) {
+    await this.git(["worktree", "remove", ...(force ? ["--force"] : []), path]);
+  }
+
+  async moveWorktree(path: string, to: string) {
+    await this.git(["worktree", "move", path, to]);
+  }
+
+  async lockWorktree(path: string, reason: string) {
+    await this.git(["worktree", "lock", ...(reason ? ["--reason", reason] : []), path]);
+  }
+
+  async unlockWorktree(path: string) {
+    await this.git(["worktree", "unlock", path]);
+  }
+
+  /** Forgets worktrees whose folder was deleted. */
+  async pruneWorktrees() {
+    await this.git(["worktree", "prune", "--verbose"]);
+  }
+
   async merge(ref: string) {
     await this.git(["merge", "--no-edit", ref]);
   }
@@ -840,6 +929,16 @@ export class Repo {
     ]);
     const gone = new Set(deleted.split("\0"));
     return [...new Set(all.split("\0"))].filter((p) => p && !gone.has(p));
+  }
+
+  /** Tracked files only (what a new worktree gets). */
+  async trackedFiles(): Promise<string[]> {
+    return (await this.read(["ls-files", "-z", "--cached"])).split("\0").filter(Boolean);
+  }
+
+  /** Everything Git does not track, ignored files included; whole untracked folders as `dir/`. */
+  async untrackedPaths(): Promise<string[]> {
+    return (await this.read(["ls-files", "-z", "--others", "--directory"])).split("\0").filter(Boolean);
   }
 
   /** `git grep` output for `grepArgs`; empty when nothing matched (exit code 1). */

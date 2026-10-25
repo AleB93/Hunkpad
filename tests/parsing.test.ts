@@ -3,11 +3,11 @@
 // This catches differences between Git versions and platforms.
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { parseNameStatus, parseStatus } from "../src/git";
+import { parseNameStatus, parseStatus, parseWorktrees } from "../src/git";
 import { parseDiffU0 } from "../src/hunks";
 import { parsePatch } from "../src/overview";
 import { splitPatch, toMarkdown } from "../src/export";
@@ -65,6 +65,30 @@ describe("parseStatus", () => {
     const status = parseStatus(git("status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"));
     expect(status.branch).toBe("start");
     expect(status.oid).toBeNull();
+  });
+});
+
+describe("parseWorktrees", () => {
+  it("reads the main and linked worktrees with their branch, lock and prunable state", () => {
+    const linked = join(dir, "..", `${basename(dir)}-feature`);
+    const gone = join(dir, "..", `${basename(dir)}-gone`);
+    try {
+      git("worktree", "add", "-q", "-b", "feature", linked);
+      git("worktree", "add", "-q", "--detach", gone, "HEAD");
+      git("worktree", "lock", "--reason", "on a USB disk", linked);
+      rmSync(gone, { recursive: true, force: true });
+      const list = parseWorktrees(git("worktree", "list", "--porcelain"));
+      expect(list.map((w) => [w.main, w.branch, w.locked, w.prunable])).toEqual([
+        [true, "main", null, false],
+        [false, "feature", "on a USB disk", false],
+        [false, null, null, true],
+      ]);
+      expect(realpathSync(list[1].path)).toBe(realpathSync(linked));
+      expect(list[1].sha).toMatch(/^[0-9a-f]{40,64}$/);
+    } finally {
+      git("worktree", "unlock", linked);
+      rmSync(linked, { recursive: true, force: true });
+    }
   });
 });
 
