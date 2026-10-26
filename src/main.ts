@@ -6079,6 +6079,59 @@ function toggleLayout() {
 $("add-tab").addEventListener("click", showProjects);
 $("app-projects").addEventListener("click", showProjects);
 $("app-search").addEventListener("click", () => showSearch("files"));
+
+// ---- side panel width (drag its right edge) -----------------------------------
+
+const SIDE_DEFAULT = 340;
+const SIDE_MIN = 220;
+const side = document.querySelector("aside")!;
+const sideResizer = $("side-resizer");
+const sideMax = () => Math.max(SIDE_MIN, Math.round(window.innerWidth * 0.7));
+const clampSide = (w: number) => Math.min(sideMax(), Math.max(SIDE_MIN, Math.round(w)));
+
+function setSideWidth(w: number, save: boolean) {
+  const width = clampSide(w);
+  side.style.width = `${width}px`;
+  sideResizer.setAttribute("aria-valuenow", String(width));
+  if (save) settings.setItem("sideWidth", String(width));
+}
+
+setSideWidth(Number(settings.getItem("sideWidth")) || SIDE_DEFAULT, false);
+
+sideResizer.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  sideResizer.setPointerCapture(e.pointerId);
+  document.body.classList.add("resizing-side");
+  const left = side.getBoundingClientRect().left;
+  const move = (ev: PointerEvent) => setSideWidth(ev.clientX - left, false);
+  const end = (ev: PointerEvent) => {
+    sideResizer.releasePointerCapture(ev.pointerId);
+    sideResizer.removeEventListener("pointermove", move);
+    sideResizer.removeEventListener("pointerup", end);
+    sideResizer.removeEventListener("pointercancel", end);
+    document.body.classList.remove("resizing-side");
+    setSideWidth(side.getBoundingClientRect().width, true);
+  };
+  sideResizer.addEventListener("pointermove", move);
+  sideResizer.addEventListener("pointerup", end);
+  sideResizer.addEventListener("pointercancel", end);
+});
+sideResizer.addEventListener("dblclick", () => setSideWidth(SIDE_DEFAULT, true));
+sideResizer.addEventListener("keydown", (e) => {
+  const step = e.shiftKey ? 64 : 16;
+  const now = side.getBoundingClientRect().width;
+  if (e.key === "ArrowLeft") setSideWidth(now - step, true);
+  else if (e.key === "ArrowRight") setSideWidth(now + step, true);
+  else if (e.key === "Home") setSideWidth(SIDE_DEFAULT, true);
+  else return;
+  e.preventDefault();
+});
+// A smaller window must not leave the panel wider than the 70% limit.
+window.addEventListener("resize", () => {
+  const now = side.getBoundingClientRect().width;
+  if (now > sideMax()) setSideWidth(now, false);
+});
 $("branch-btn").addEventListener("click", () =>
   showTab("branches")
     .then(() => branchFilter.select())

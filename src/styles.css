@@ -128,10 +128,25 @@ aside {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  resize: horizontal;
   background: var(--bg-side);
   border-right: 1px solid var(--border);
 }
+
+/* The side panel's right edge: a wide, invisible grab area over the border. */
+#side-resizer {
+  flex: none;
+  width: 6px;
+  margin-left: -4px;
+  margin-right: -2px;
+  z-index: 6; /* above the Monaco editor's edge */
+  cursor: col-resize;
+  touch-action: none;
+}
+#side-resizer:hover,
+#side-resizer:focus-visible,
+body.resizing-side #side-resizer { background: color-mix(in srgb, var(--accent) 55%, transparent); outline: none; }
+body.resizing-side { cursor: col-resize; user-select: none; }
+body.resizing-side main { pointer-events: none; } /* the editor must not take the drag */
 
 #tabs { display: flex; border-bottom: 1px solid var(--border); }
 #tabs button {
