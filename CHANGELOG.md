@@ -6,6 +6,15 @@ All notable changes to Hunkpad are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-26
+
+### Changed
+
+- The side panel (Changes, History, Branches, Stashes, Comments) is resized by
+  dragging its right edge, from 220px up to 70% of the window: double-click
+  the edge to reset it, or use the arrow keys when it is focused. The width is
+  remembered.
+
 ## [0.3.0] - 2026-10-25
 
 ### Added
@@ -93,6 +102,7 @@ All notable changes to Hunkpad are listed here. The format follows
 
 First version (as Diffpane), for Windows.
 
-[Unreleased]: https://github.com/AleB93/Hunkpad/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/AleB93/Hunkpad/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/AleB93/Hunkpad/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/AleB93/Hunkpad/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/AleB93/Hunkpad/releases/tag/v0.2.0
