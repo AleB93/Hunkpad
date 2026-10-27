@@ -261,6 +261,22 @@ function promptInput(label: string, value = ""): Promise<string | null> {
   );
 }
 
+/** Like promptInput, but an empty answer is "" (OK with nothing typed); only Cancel gives null. */
+function promptOptional(label: string, value = ""): Promise<string | null> {
+  $("input-label").textContent = label;
+  inputValue.value = value;
+  inputDialog.returnValue = "";
+  inputDialog.showModal();
+  inputValue.select();
+  return new Promise((resolve) =>
+    inputDialog.addEventListener(
+      "close",
+      () => resolve(inputDialog.returnValue === "ok" ? inputValue.value.trim() : null),
+      { once: true },
+    ),
+  );
+}
+
 const confirmAction = (message: string) => ask(message, { title: "Hunkpad", kind: "warning" });
 
 // ---- status bar & output log ---------------------------------------------
@@ -361,9 +377,9 @@ const showArgs = (args: string[]) =>
 
 /** What a Git command does, in plain words; `danger` = loses work or rewrites shared history. */
 function explainGit(args: string[]): { text: string; danger: boolean } {
-  // Skip global "-c key=value" options to find the subcommand.
+  // Skip global options ("-c key=value", "--no-literal-pathspecs"…) to find the subcommand.
   let i = 0;
-  while (args[i] === "-c") i += 2;
+  while (args[i] === "-c" || args[i]?.startsWith("--")) i += args[i] === "-c" ? 2 : 1;
   const sub = args[i] ?? "";
   const rest = args.slice(i + 1);
   const has = (...flags: string[]) => flags.some((f) => rest.includes(f));
@@ -5017,8 +5033,11 @@ function newWorktreeFor(ref: Ref) {
 let expandedStash: string | null = null;
 
 async function stashChanges(includeUntracked: boolean) {
-  const message = await promptInput(includeUntracked ? "Stash message (including untracked)" : "Stash message");
-  act("Stash", () => repo!.stash(message, includeUntracked));
+  const message = await promptOptional(
+    includeUntracked ? "Stash message, optional (including untracked files)" : "Stash message, optional",
+  );
+  if (message === null) return; // cancelled
+  act(includeUntracked ? "Stash (with untracked)" : "Stash", () => repo!.stash(message || null, includeUntracked));
 }
 
 async function loadStashes() {
@@ -5064,6 +5083,7 @@ async function stashRows(r: Repo, st: Stash): Promise<HTMLElement[]> {
       onclick: toggleFiles,
     },
     h("span", { class: "name spacer" }, st.message),
+    st.untracked ? h("span", { class: "badge", title: "Includes untracked files" }, "+U") : null,
     h(
       "span",
       { class: "actions" },
@@ -5072,7 +5092,19 @@ async function stashRows(r: Repo, st: Stash): Promise<HTMLElement[]> {
       iconBtn("✕", "Drop the stash", drop),
     ),
   ), menu);
-  return isOpen ? [row, await changeList(`${st.ref}^1`, st.ref, st.ref, null)] : [row];
+  if (!isOpen) return [row];
+  // Tracked changes: the stash against its HEAD. Untracked files (stash -u) are
+  // a separate third parent, so they get their own list.
+  const tracked = await changeList(`${st.ref}^1`, st.ref, st.ref, null);
+  if (!st.untracked) return [row, tracked];
+  const untracked = await changeList(EMPTY_TREE, `${st.ref}^3`, `${st.ref} · untracked`, null);
+  const onlyUntracked = !!tracked.querySelector(".empty");
+  return [
+    row,
+    ...(onlyUntracked ? [] : [tracked]),
+    h("div", { class: "sub-head stash-part" }, "Untracked files"),
+    untracked,
+  ];
 }
 
 // ---- tabs -----------------------------------------------------------------

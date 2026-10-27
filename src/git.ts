@@ -193,9 +193,20 @@ export interface Commit {
   subject: string;
 }
 
+/**
+ * `git stash push`, with pathspec magic back on. Every command runs with
+ * GIT_LITERAL_PATHSPECS=1 (file names are never patterns), but `stash -u`
+ * removes the untracked files it saved with an internal `git clean -- :/`,
+ * and a literal ":/" matches nothing: the files were stashed and also left in
+ * place. The stash command itself takes no paths, so nothing else changes.
+ */
+export const STASH_PUSH = ["--no-literal-pathspecs", "stash", "push"];
+
 export interface Stash {
   ref: string;
   message: string;
+  /** Made with --include-untracked: those files are in a third parent, `<ref>^3`. */
+  untracked: boolean;
 }
 
 /** One index line: a file version (mode + object id), or sha null to remove the path. */
@@ -700,7 +711,7 @@ export class Repo {
     }
     const top = () => this.read(["rev-parse", "-q", "--verify", "refs/stash"], true).then((s) => s.trim());
     const before = await top();
-    await this.git(["stash", "push", "-u", "-m", `hunkpad autostash: ${label}`]);
+    await this.git([...STASH_PUSH, "-u", "-m", `hunkpad autostash: ${label}`]);
     const ours = await top();
     if (!ours || ours === before) {
       await checkout(); // nothing was stashed after all
@@ -951,18 +962,19 @@ export class Repo {
   // ---- stashes ----------------------------------------------------------
 
   async stashes(): Promise<Stash[]> {
-    const out = await this.read(["stash", "list", "--format=%gd%x00%s"], true);
+    // %P: the stash commit's parents (HEAD, the index, and the untracked files when stashed with -u).
+    const out = await this.read(["stash", "list", "--format=%gd%x00%s%x00%P"], true);
     return out
       .split("\n")
       .filter(Boolean)
       .map((line) => {
-        const [ref, message] = line.split("\0");
-        return { ref, message };
+        const [ref, message, parents = ""] = line.split("\0");
+        return { ref, message, untracked: parents.trim().split(/\s+/).length >= 3 };
       });
   }
 
   async stash(message: string | null, includeUntracked: boolean) {
-    await this.git(["stash", "push", ...(includeUntracked ? ["-u"] : []), ...(message ? ["-m", message] : [])]);
+    await this.git([...STASH_PUSH, ...(includeUntracked ? ["-u"] : []), ...(message ? ["-m", message] : [])]);
   }
 
   async stashApply(ref: string, pop: boolean) {
