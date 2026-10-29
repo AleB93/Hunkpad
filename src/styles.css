@@ -71,6 +71,62 @@
   --del: #ff004d;
   --ren: #29adff;
 }
+/* Neon: synthwave on near-black, magenta and cyan glow. */
+:root[data-theme="neon"] {
+  color-scheme: dark;
+  --bg: #0b0b14;
+  --bg-side: #12121f;
+  --fg: #e8e8ff;
+  --muted: #8f8fc2;
+  --border: #2b2b4d;
+  --hover: #1d1d36;
+  --selected: #3d1150;
+  --accent: #ff2bd6;
+  --accent-fg: #0b0b14;
+  --banner: #3a2a00;
+  --mod: #ffd300;
+  --add: #39ff14;
+  --del: #ff3864;
+  --ren: #00f0ff;
+}
+/* Pride (LGBTQ+): a dark neutral base so the rainbow stands out. */
+:root[data-theme="pride"] {
+  color-scheme: dark;
+  --bg: #1b1b22;
+  --bg-side: #23232d;
+  --fg: #f3f3f6;
+  --muted: #a3a3b5;
+  --border: #393946;
+  --hover: #2d2d3a;
+  --selected: #3b2a5c;
+  --accent: #a35cff;
+  --accent-fg: #ffffff;
+  --banner: #4a3a10;
+  --mod: #ffb000;
+  --add: #2fbf4f;
+  --del: #ff4d4d;
+  --ren: #4d8bff;
+  --rainbow: linear-gradient(90deg, #e40303, #ff8c00, #ffed00, #008026, #004dff, #750787);
+}
+/* Halal: emerald, gold and ivory, inspired by Islamic art (geometric pattern, no text or symbols). */
+:root[data-theme="halal"] {
+  color-scheme: light;
+  --bg: #fbf7ec;
+  --bg-side: #f2ebd8;
+  --fg: #1c2a23;
+  --muted: #6d6a55;
+  --border: #dacfb2;
+  --hover: #ebe1c5;
+  --selected: #cfe7d9;
+  --accent: #0b6e4f;
+  --accent-fg: #ffffff;
+  --banner: #f4e3b2;
+  --mod: #9a6b00;
+  --add: #1e7a3c;
+  --del: #b42318;
+  --ren: #0b6e4f;
+  --gold: #c9a227;
+}
 
 * { box-sizing: border-box; }
 
@@ -968,3 +1024,264 @@ button:disabled:hover { background: var(--bg-side); }
   pointer-events: none;
   background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0.14) 0 1px, transparent 1px 3px);
 }
+
+/* ---- Neon theme extras ---- */
+[data-theme="neon"] #wordmark {
+  color: #fff;
+  text-shadow: 0 0 4px #ff2bd6, 0 0 10px #ff2bd6, 0 0 18px #00f0ff;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+[data-theme="neon"] #appbar { border-bottom: 2px solid transparent; border-image: linear-gradient(90deg, #ff2bd6, #00f0ff) 1; }
+[data-theme="neon"] button:hover { border-color: #00f0ff; box-shadow: 0 0 6px #00f0ff88; }
+[data-theme="neon"] button.primary { box-shadow: 0 0 8px #ff2bd6aa; }
+[data-theme="neon"] button.primary:hover { box-shadow: 0 0 14px #ff2bd6; border-color: #ff2bd6; }
+[data-theme="neon"] .repo-tab.active,
+[data-theme="neon"] .user-tab.active { box-shadow: 0 0 8px #ff2bd655; }
+[data-theme="neon"] ::selection { background: #ff2bd6; color: #0b0b14; }
+
+/* ---- Pride theme extras ---- */
+[data-theme="pride"] #appbar { border-bottom: 4px solid transparent; border-image: var(--rainbow) 1; }
+[data-theme="pride"] #wordmark {
+  background: var(--rainbow);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-weight: 700;
+}
+[data-theme="pride"] button.primary { background: var(--rainbow); border-color: transparent; color: #fff; text-shadow: 0 1px 2px #0009; }
+[data-theme="pride"] button.primary:hover { filter: brightness(1.12); }
+[data-theme="pride"] .seg button.active { box-shadow: inset 0 -3px 0 #ffed00; }
+[data-theme="pride"] ::selection { background: #a35cff; color: #fff; }
+
+/* ---- Halal theme extras ---- */
+/* A faint gold eight-pointed star lattice in the top bar. */
+[data-theme="halal"] #appbar {
+  border-bottom: 2px solid var(--gold);
+  background-color: #0b6e4f;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28'%3E%3Cg fill='none' stroke='%23c9a227' stroke-opacity='0.45' stroke-width='1'%3E%3Crect x='8' y='8' width='12' height='12'/%3E%3Crect x='8' y='8' width='12' height='12' transform='rotate(45 14 14)'/%3E%3C/g%3E%3C/svg%3E");
+  color: #f8f1dc;
+}
+[data-theme="halal"] #appbar > button,
+[data-theme="halal"] #theme-select { background: #0e5a42; color: #f8f1dc; border-color: #c9a22799; }
+[data-theme="halal"] #appbar > button:hover { background: #127554; }
+[data-theme="halal"] #theme-pick { color: #e9dcb0; }
+[data-theme="halal"] #wordmark { color: #f3d77a; letter-spacing: 0.04em; }
+[data-theme="halal"] button.primary { box-shadow: inset 0 -2px 0 var(--gold); }
+[data-theme="halal"] .repo-tab.active { border-top-color: var(--gold); }
+[data-theme="halal"] ::selection { background: #f3d77a; color: #1c2a23; }
+
+/* ==== Extra themes (src/themes.ts sets their colours; these are their touches) ==== */
+
+/* Room for a decorative layer behind the top bar's content. */
+[data-theme] #appbar { position: relative; overflow: hidden; }
+[data-theme] #appbar > * { position: relative; z-index: 1; }
+.theme-layer { display: none; }
+
+/* -- High contrast: thick borders, clear focus -- */
+[data-theme="contrast"] button,
+[data-theme="contrast"] input,
+[data-theme="contrast"] select,
+[data-theme="contrast"] textarea { border-width: 2px; border-color: #fff; }
+[data-theme="contrast"] :focus-visible { outline: 3px solid #ffff00 !important; outline-offset: 1px; }
+[data-theme="contrast"] .item.selected,
+[data-theme="contrast"] .repo-tab.active { outline: 2px solid #ffff00; outline-offset: -2px; }
+[data-theme="contrast"] a { text-decoration: underline; }
+
+/* -- Colour-blind safe: nothing extra beyond blue / orange diffs -- */
+
+/* -- Solarized, Nord: palettes only -- */
+
+/* -- Sepia / Paper: serif titles -- */
+[data-theme="sepia"] #wordmark,
+[data-theme="sepia"] .section-head,
+[data-theme="sepia"] .markdown h1,
+[data-theme="sepia"] .markdown h2 { font-family: Georgia, "Times New Roman", serif; }
+[data-theme="sepia"] #wordmark { font-style: italic; }
+
+/* -- Terminal: monospace everywhere, blinking block cursor -- */
+[data-theme="terminal"] body,
+[data-theme="amber"] body,
+[data-theme="matrix"] body,
+[data-theme="gameboy"] body { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; font-size: 12.5px; }
+[data-theme="terminal"] #wordmark { text-transform: lowercase; text-shadow: 0 0 6px #33ff6699; }
+[data-theme="terminal"] #wordmark::before { content: "~$ "; opacity: 0.7; }
+[data-theme="terminal"] #wordmark::after,
+[data-theme="amber"] #wordmark::after { content: "█"; margin-left: 2px; }
+@media (prefers-reduced-motion: no-preference) {
+  [data-theme="terminal"] #wordmark::after,
+  [data-theme="amber"] #wordmark::after { animation: theme-blink 1s steps(1) infinite; }
+}
+@keyframes theme-blink { 50% { opacity: 0; } }
+[data-theme="terminal"] *,
+[data-theme="amber"] *,
+[data-theme="matrix"] *,
+[data-theme="gameboy"] *,
+[data-theme="win95"] *,
+[data-theme="blueprint"] * { border-radius: 0 !important; }
+
+/* -- Amber CRT: glow and scanlines -- */
+[data-theme="amber"] #wordmark { text-shadow: 0 0 6px #ffb000aa; text-transform: uppercase; }
+[data-theme="amber"] body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  pointer-events: none;
+  background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0.18) 0 1px, transparent 1px 3px);
+}
+
+/* -- Vaporwave: sunset with a grid horizon in the top bar -- */
+[data-theme="vaporwave"] #appbar {
+  background:
+    repeating-linear-gradient(90deg, #ffffff22 0 1px, transparent 1px 22px),
+    linear-gradient(180deg, #ff71ce 0%, #b967ff 55%, #01cdfe 100%);
+  color: #fff;
+  border-bottom: 2px solid #01cdfe;
+}
+[data-theme="vaporwave"] #wordmark { font-style: italic; letter-spacing: 0.25em; text-transform: uppercase; text-shadow: 2px 2px 0 #241734; }
+[data-theme="vaporwave"] #appbar > button,
+[data-theme="vaporwave"] #theme-select { background: #241734cc; color: #ffe6ff; border-color: #ffffff66; }
+[data-theme="vaporwave"] #theme-pick { color: #fff; }
+
+/* -- Windows 95: bevels, navy title bar -- */
+[data-theme="win95"] body { font-family: Tahoma, "MS Sans Serif", "Segoe UI", sans-serif; }
+[data-theme="win95"] #appbar { background: linear-gradient(90deg, #000080, #1084d0); color: #fff; border-bottom: 2px solid #808080; }
+[data-theme="win95"] #wordmark { font-weight: 700; }
+[data-theme="win95"] #theme-pick { color: #fff; }
+[data-theme="win95"] button,
+[data-theme="win95"] select {
+  background: #c0c0c0;
+  color: #000;
+  border: 2px solid;
+  border-color: #ffffff #404040 #404040 #ffffff;
+  box-shadow: inset -1px -1px 0 #808080, inset 1px 1px 0 #dfdfdf;
+}
+[data-theme="win95"] button:active { border-color: #404040 #ffffff #ffffff #404040; box-shadow: inset 1px 1px 0 #808080; }
+[data-theme="win95"] button.primary { background: #c0c0c0; color: #000; font-weight: 700; outline: 1px solid #000; }
+[data-theme="win95"] button.icon,
+[data-theme="win95"] button.link,
+[data-theme="win95"] .repo-tab button { border: none; box-shadow: none; background: none; }
+[data-theme="win95"] #app-projects { font-weight: 700; }
+[data-theme="win95"] input,
+[data-theme="win95"] textarea { border: 2px solid; border-color: #404040 #ffffff #ffffff #404040; background: #fff; }
+
+/* -- Game Boy: four greens, pixel feel -- */
+[data-theme="gameboy"] #appbar { border-bottom: 3px solid #0f380f; }
+[data-theme="gameboy"] #wordmark { text-transform: uppercase; letter-spacing: 0.1em; }
+[data-theme="gameboy"] button { box-shadow: 2px 2px 0 #0f380f; }
+
+/* -- Matrix: falling glyphs in the top bar -- */
+[data-theme="matrix"] #wordmark { text-shadow: 0 0 6px #00ff41; }
+[data-theme="matrix"] #appbar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.35;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='96' font-family='monospace' font-size='12' fill='%2300ff41'%3E%3Ctext x='4' y='14'%3Eﾊ%3C/text%3E%3Ctext x='4' y='40'%3E1%3C/text%3E%3Ctext x='4' y='70'%3Eﾐ%3C/text%3E%3Ctext x='34' y='26'%3E0%3C/text%3E%3Ctext x='34' y='58'%3Eｼ%3C/text%3E%3Ctext x='34' y='88'%3E7%3C/text%3E%3Ctext x='64' y='8'%3Eﾂ%3C/text%3E%3Ctext x='64' y='46'%3E9%3C/text%3E%3Ctext x='64' y='80'%3Eｱ%3C/text%3E%3Ctext x='94' y='20'%3E4%3C/text%3E%3Ctext x='94' y='52'%3Eｦ%3C/text%3E%3Ctext x='94' y='90'%3E2%3C/text%3E%3C/svg%3E");
+}
+@media (prefers-reduced-motion: no-preference) {
+  [data-theme="matrix"] #appbar::before { animation: theme-fall 3s linear infinite; }
+}
+@keyframes theme-fall { from { background-position: 0 0; } to { background-position: 0 96px; } }
+
+/* -- Blueprint: grid paper -- */
+[data-theme="blueprint"] aside,
+[data-theme="blueprint"] #appbar {
+  background-color: var(--bg-side);
+  background-image:
+    linear-gradient(#ffffff14 1px, transparent 1px),
+    linear-gradient(90deg, #ffffff14 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+[data-theme="blueprint"] #wordmark,
+[data-theme="blueprint"] .section-head { font-family: "Cascadia Mono", Consolas, monospace; text-transform: uppercase; letter-spacing: 0.08em; }
+[data-theme="blueprint"] button { border-style: dashed; }
+
+/* -- Diwali: a row of diyas -- */
+[data-theme="diwali"] #appbar { border-bottom: 2px solid #ffa41b; }
+[data-theme="diwali"] #wordmark { color: #ffd700; text-shadow: 0 0 8px #ffa41b88; }
+[data-theme="diwali"] #appbar::before {
+  content: "🪔 ✦ 🪔 ✦ 🪔 ✦ 🪔 ✦ 🪔 ✦ 🪔 ✦ 🪔 ✦ 🪔 ✦ 🪔 ✦ 🪔 ✦ 🪔 ✦ 🪔 ✦ 🪔 ✦ 🪔 ✦ 🪔";
+  position: absolute;
+  left: 45%;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  color: #ffd700;
+  opacity: 0.55;
+  font-size: 12px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  [data-theme="diwali"] #appbar::before { animation: theme-flicker 2.4s ease-in-out infinite alternate; }
+}
+@keyframes theme-flicker { from { opacity: 0.4; } to { opacity: 0.7; } }
+
+/* Diwali and Lunar rows stop before the theme picker. */
+[data-theme="diwali"] #appbar::before,
+[data-theme="lunar"] #appbar::before { right: 230px; overflow: hidden; }
+
+/* -- Lunar New Year: red and gold, lanterns -- */
+[data-theme="lunar"] #appbar { border-bottom: 2px solid #f5c518; }
+[data-theme="lunar"] #wordmark { color: #f5c518; }
+[data-theme="lunar"] #appbar::before {
+  content: "🏮      🏮      🏮      🏮      🏮      🏮      🏮      🏮";
+  position: absolute;
+  left: 40%;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 0;
+  pointer-events: none;
+  white-space: pre;
+  opacity: 0.6;
+  font-size: 13px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  [data-theme="lunar"] #appbar::before { animation: theme-sway 3s ease-in-out infinite alternate; }
+}
+@keyframes theme-sway { from { transform: translateY(-50%) rotate(-1.5deg); } to { transform: translateY(-50%) rotate(1.5deg); } }
+
+/* -- Christmas, Halloween, Sakura: things drifting down the top bar -- */
+[data-theme="christmas"] #appbar { border-bottom: 2px solid #d4202c; }
+[data-theme="christmas"] #wordmark { color: #fff; text-shadow: 0 0 6px #ffffff88; }
+[data-theme="halloween"] #appbar { border-bottom: 2px solid #ff7518; }
+[data-theme="halloween"] #wordmark { color: #ff7518; text-shadow: 0 0 8px #8a2be2; }
+[data-theme="sakura"] #appbar { border-bottom: 2px solid #f3a6bf; }
+[data-theme="sakura"] #wordmark { color: #e75480; }
+[data-theme="christmas"] #appbar::before,
+[data-theme="halloween"] #appbar::before,
+[data-theme="sakura"] #appbar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+[data-theme="christmas"] #appbar::before {
+  opacity: 0.8;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='90' height='60' fill='%23ffffff'%3E%3Ccircle cx='10' cy='8' r='1.6'/%3E%3Ccircle cx='38' cy='22' r='1.2'/%3E%3Ccircle cx='64' cy='5' r='1.8'/%3E%3Ccircle cx='80' cy='34' r='1.3'/%3E%3Ccircle cx='24' cy='44' r='1.5'/%3E%3Ccircle cx='52' cy='52' r='1.1'/%3E%3C/svg%3E");
+}
+[data-theme="halloween"] #appbar::before {
+  opacity: 0.5;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='60' font-size='12'%3E%3Ctext x='20' y='16'%3E🦇%3C/text%3E%3Ctext x='95' y='40'%3E🦇%3C/text%3E%3C/svg%3E");
+}
+[data-theme="sakura"] #appbar::before {
+  opacity: 0.75;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='60' fill='%23f48fb1'%3E%3Cellipse cx='14' cy='10' rx='3' ry='1.8' transform='rotate(30 14 10)'/%3E%3Cellipse cx='58' cy='30' rx='2.6' ry='1.6' transform='rotate(-20 58 30)'/%3E%3Cellipse cx='96' cy='12' rx='3' ry='1.8' transform='rotate(60 96 12)'/%3E%3Cellipse cx='34' cy='48' rx='2.4' ry='1.5' transform='rotate(10 34 48)'/%3E%3C/svg%3E");
+}
+@media (prefers-reduced-motion: no-preference) {
+  [data-theme="christmas"] #appbar::before { animation: theme-snow 6s linear infinite; }
+  [data-theme="halloween"] #appbar::before { animation: theme-bats 9s linear infinite; }
+  [data-theme="sakura"] #appbar::before { animation: theme-petals 8s linear infinite; }
+}
+@keyframes theme-snow { from { background-position: 0 0; } to { background-position: 0 60px; } }
+@keyframes theme-bats { from { background-position: 0 0; } to { background-position: -160px 0; } }
+@keyframes theme-petals { from { background-position: 0 0; } to { background-position: 60px 60px; } }
+
+/* -- Italia: the tricolore under the top bar -- */
+[data-theme="italia"] #appbar { border-bottom: 4px solid transparent; border-image: linear-gradient(90deg, #009246 0 33.3%, #ffffff 33.3% 66.6%, #ce2b37 66.6%) 1; }
+[data-theme="italia"] #wordmark { color: #009246; }

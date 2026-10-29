@@ -30,6 +30,7 @@ import {
   setLogger,
 } from "./git";
 import { McpHost, Outcome, ToolError, blockId, handleMcp, installArgs, mcpUrl, newToken, parseBlockId, removeArgs } from "./mcp";
+import { EXTRA_THEMES, applyTokens, editorThemeData, seasonalTheme } from "./themes";
 import { isMarkdown, isWebLink, markdownToHtml, resolveRepoPath, slug } from "./markdown";
 import { TextMatch, TextSearchOptions, grepArgs, matchRange, parseGrep, rankFiles } from "./search";
 import { LineChange, applyLineChanges, applyLineChangesWithRanges } from "./lineChanges";
@@ -698,12 +699,12 @@ gitDialog.addEventListener("close", () => {
 
 // ---- diff editor ----------------------------------------------------------
 
-// ---- themes (top bar): System follows the OS; Light, Dark and Retro are fixed ----
+// ---- themes (top bar): System follows the OS; the others are fixed ----------
 
-type Theme = "system" | "light" | "dark" | "retro";
-const THEMES: Theme[] = ["system", "light", "dark", "retro"];
+type Theme = "system" | "light" | "dark" | "retro" | "neon" | "pride" | "halal";
+const THEMES: Theme[] = ["system", "light", "dark", "retro", "neon", "pride", "halal"];
 const dark = window.matchMedia("(prefers-color-scheme: dark)");
-let theme: Theme = THEMES.find((t) => t === settings.getItem("theme")) ?? "system";
+
 
 // The code editor's Retro look: the same PICO-8 palette as the app.
 monaco.editor.defineTheme("hunkpad-retro", {
@@ -734,21 +735,147 @@ monaco.editor.defineTheme("hunkpad-retro", {
   },
 });
 
-const editorTheme = () =>
-  theme === "retro" ? "hunkpad-retro" : theme === "dark" || (theme === "system" && dark.matches) ? "vs-dark" : "vs";
+// Neon: magenta, cyan and acid green on near-black.
+monaco.editor.defineTheme("hunkpad-neon", {
+  base: "vs-dark",
+  inherit: true,
+  rules: [
+    { token: "comment", foreground: "6b6ba3", fontStyle: "italic" },
+    { token: "keyword", foreground: "ff2bd6" },
+    { token: "string", foreground: "ffd300" },
+    { token: "number", foreground: "39ff14" },
+    { token: "type", foreground: "00f0ff" },
+  ],
+  colors: {
+    "editor.background": "#0b0b14",
+    "editorGutter.background": "#0b0b14",
+    "editor.foreground": "#e8e8ff",
+    "editorLineNumber.foreground": "#44446e",
+    "editorLineNumber.activeForeground": "#00f0ff",
+    "editorCursor.foreground": "#ff2bd6",
+    "editor.lineHighlightBackground": "#14142a",
+    "editor.selectionBackground": "#4a1460",
+    "diffEditor.insertedTextBackground": "#39ff1433",
+    "diffEditor.removedTextBackground": "#ff386440",
+    "diffEditor.insertedLineBackground": "#39ff1414",
+    "diffEditor.removedLineBackground": "#ff386418",
+  },
+});
 
-function applyTheme(next: Theme) {
-  theme = next;
-  if (next === "system") document.documentElement.removeAttribute("data-theme");
-  else document.documentElement.dataset.theme = next;
+// Pride: the flag's colours for the syntax, on a dark neutral background.
+monaco.editor.defineTheme("hunkpad-pride", {
+  base: "vs-dark",
+  inherit: true,
+  rules: [
+    { token: "comment", foreground: "8e8ea3", fontStyle: "italic" },
+    { token: "keyword", foreground: "ff8c00" },
+    { token: "string", foreground: "ffed00" },
+    { token: "number", foreground: "3ddc6a" },
+    { token: "type", foreground: "5c8dff" },
+    { token: "delimiter", foreground: "c792ea" },
+  ],
+  colors: {
+    "editor.background": "#1b1b22",
+    "editorGutter.background": "#1b1b22",
+    "editorLineNumber.activeForeground": "#ff8c00",
+    "editorCursor.foreground": "#ffed00",
+    "editor.selectionBackground": "#4a3570",
+    "diffEditor.insertedTextBackground": "#2fbf4f38",
+    "diffEditor.removedTextBackground": "#ff4d4d38",
+  },
+});
+
+// Halal: emerald, gold and ivory.
+monaco.editor.defineTheme("hunkpad-halal", {
+  base: "vs",
+  inherit: true,
+  rules: [
+    { token: "comment", foreground: "8c8670", fontStyle: "italic" },
+    { token: "keyword", foreground: "0b6e4f", fontStyle: "bold" },
+    { token: "string", foreground: "8a5a00" },
+    { token: "number", foreground: "a0522d" },
+    { token: "type", foreground: "1b5e8a" },
+  ],
+  colors: {
+    "editor.background": "#fbf7ec",
+    "editorGutter.background": "#f6f0df",
+    "editor.foreground": "#1c2a23",
+    "editorLineNumber.foreground": "#b8ad8c",
+    "editorLineNumber.activeForeground": "#0b6e4f",
+    "editorCursor.foreground": "#0b6e4f",
+    "editor.lineHighlightBackground": "#f3ecd8",
+    "editor.selectionBackground": "#f3d77a88",
+    "diffEditor.insertedTextBackground": "#1e7a3c30",
+    "diffEditor.removedTextBackground": "#b4231830",
+  },
+});
+
+/** The code editor's theme for each built-in app theme (System follows the OS). */
+const EDITOR_THEMES: Record<Exclude<Theme, "system">, string> = {
+  light: "vs",
+  dark: "vs-dark",
+  retro: "hunkpad-retro",
+  neon: "hunkpad-neon",
+  pride: "hunkpad-pride",
+  halal: "hunkpad-halal",
+};
+
+// The extra themes (themes.ts): their editor themes, and lookup by id.
+const EXTRA = new Map(EXTRA_THEMES.map((x) => [x.id, x]));
+for (const x of EXTRA_THEMES) monaco.editor.defineTheme(`hunkpad-${x.id}`, editorThemeData(x));
+
+/** What the dropdown holds: a built-in theme, an extra one, or "auto". */
+let themeChoice = settings.getItem("theme") ?? "system";
+if (themeChoice !== "auto" && !THEMES.includes(themeChoice as Theme) && !EXTRA.has(themeChoice)) themeChoice = "system";
+
+/** The theme actually shown: Auto becomes today's seasonal theme, else System. */
+const shownTheme = () => (themeChoice === "auto" ? (seasonalTheme(new Date()) ?? "system") : themeChoice);
+
+const editorTheme = () => {
+  const shown = shownTheme();
+  if (EXTRA.has(shown)) return `hunkpad-${shown}`;
+  if (shown === "system") return dark.matches ? "vs-dark" : "vs";
+  return EDITOR_THEMES[shown as Exclude<Theme, "system">] ?? "vs";
+};
+
+/** The dropdown: grouped, built-in and extra themes side by side. */
+function fillThemeSelect(select: HTMLSelectElement) {
+  const label = (id: string) =>
+    ({ system: "System", auto: "Auto (seasonal)", light: "Light", dark: "Dark", retro: "Retro", neon: "Neon", pride: "Pride (LGBTQ+)", halal: "Halal" })[id] ??
+    EXTRA.get(id)?.label ??
+    id;
+  const groups: [string, string[]][] = [
+    ["Basic", ["system", "auto", "light", "dark"]],
+    ["Practical", EXTRA_THEMES.filter((x) => x.group === "Practical").map((x) => x.id)],
+    ["Fun", ["retro", "neon", ...EXTRA_THEMES.filter((x) => x.group === "Fun").map((x) => x.id)]],
+    ["Seasonal & cultural", ["pride", "halal", ...EXTRA_THEMES.filter((x) => x.group === "Seasonal & cultural").map((x) => x.id)]],
+  ];
+  select.replaceChildren(
+    ...groups.map(([name, ids]) => h("optgroup", { label: name }, ...ids.map((id) => h("option", { value: id }, label(id))))),
+  );
+}
+
+function applyTheme(choice: string) {
+  themeChoice = choice;
+  const shown = shownTheme();
+  const root = document.documentElement;
+  if (shown === "system") root.removeAttribute("data-theme");
+  else root.dataset.theme = shown;
+  applyTokens(root, EXTRA.get(shown) ?? null);
   monaco.editor.setTheme(editorTheme());
   const select = document.getElementById("theme-select") as HTMLSelectElement | null;
-  if (select) select.value = next;
+  if (select) {
+    select.value = choice;
+    select.title = choice === "auto" ? `Auto: ${shown === "system" ? "no season today, following the system" : select.querySelector(`option[value="${shown}"]`)?.textContent}` : "";
+  }
 }
-applyTheme(theme);
-dark.addEventListener("change", () => theme === "system" && monaco.editor.setTheme(editorTheme()));
+fillThemeSelect($<HTMLSelectElement>("theme-select"));
+applyTheme(themeChoice);
+dark.addEventListener("change", () => shownTheme() === "system" && monaco.editor.setTheme(editorTheme()));
+// Auto: look at the date again every hour (a window left open over midnight).
+window.setInterval(() => themeChoice === "auto" && applyTheme("auto"), 60 * 60 * 1000);
 $<HTMLSelectElement>("theme-select").addEventListener("change", (e) => {
-  const value = (e.target as HTMLSelectElement).value as Theme;
+  const value = (e.target as HTMLSelectElement).value;
   settings.setItem("theme", value);
   applyTheme(value);
 });
