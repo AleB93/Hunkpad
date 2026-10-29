@@ -6,6 +6,24 @@ All notable changes to Hunkpad are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-29
+
+### Added
+
+- Themes: Neon, Pride (LGBTQ+) and Halal; practical High contrast, Colour-blind
+  safe (blue and orange diffs), Solarized light and dark, Nord and Sepia; fun
+  Terminal, Amber CRT, Vaporwave, Windows 95, Game Boy, Matrix and Blueprint;
+  seasonal Diwali, Lunar New Year, Christmas, Halloween, Sakura and Italia.
+  Each has a matching editor theme, and animations stop with reduced motion.
+- Auto (seasonal) theme: a seasonal theme on its dates, otherwise the system
+  theme.
+
+### Fixed
+
+- Stash including untracked files saved them but left them in place; it now
+  removes them, and so does checkout auto-stash. A stash's file list shows its
+  untracked files, and Cancel in the stash message prompt no longer stashes.
+
 ## [0.3.1] - 2026-10-26
 
 ### Changed
@@ -102,7 +120,8 @@ All notable changes to Hunkpad are listed here. The format follows
 
 First version (as Diffpane), for Windows.
 
-[Unreleased]: https://github.com/AleB93/Hunkpad/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/AleB93/Hunkpad/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/AleB93/Hunkpad/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/AleB93/Hunkpad/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/AleB93/Hunkpad/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/AleB93/Hunkpad/releases/tag/v0.2.0

@@ -1,7 +1,7 @@
 {
   "name": "hunkpad",
   "private": true,
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Lightweight Git client with VS Code-quality diffs, for Windows, macOS and Linux",
   "license": "MIT",
   "type": "module",
