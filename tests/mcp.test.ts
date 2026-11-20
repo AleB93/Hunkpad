@@ -32,6 +32,12 @@ function fakeHost(): McpHost & { calls: unknown[][] } {
     worktreeSetup: async () => ({ saved: false }),
     setWorktreeSetup: async (c: object) => (calls.push(["setWorktreeSetup", c]), "done"),
     runWorktreeSetup: async (w: string) => (calls.push(["runWorktreeSetup", w]), { outcome: "cancelled" }),
+    listScripts: rec("listScripts", { scripts: [{ id: "s1", name: "build & run" }] }),
+    runScript: async (s: string) => {
+      calls.push(["runScript", s]);
+      if (s === "missing") throw new ToolError("No script “missing”");
+      return s === "declined" ? { outcome: "cancelled" } : { outcome: "done", script: s };
+    },
   };
 }
 
@@ -115,5 +121,27 @@ describe("worktree setup tools", () => {
     expect(text(await call(host, "hunkpad_set_worktree_setup", { basePort: 70000 }))).toMatch(/basePort/);
     expect(text(await call(host, "hunkpad_set_worktree_setup", {}))).toMatch(/give copy/);
     expect(text(await call(host, "hunkpad_run_worktree_setup", { worktree: "/r/wt" }))).toContain("declined");
+  });
+});
+
+describe("MCP scripts", () => {
+  it("lists the saved scripts", async () => {
+    const host = fakeHost();
+    const a = await call(host, "hunkpad_list_scripts");
+    expect((a as { result: { structuredContent: unknown } }).result.structuredContent).toEqual({ scripts: [{ id: "s1", name: "build & run" }] });
+  });
+
+  it("runs a script by id or name, and says when it started or was declined", async () => {
+    const host = fakeHost();
+    expect(text(await call(host, "hunkpad_run_script", { script: "  s1 " }))).toMatch(/Started in a new window/);
+    expect(host.calls).toContainEqual(["runScript", "s1"]);
+    expect(text(await call(host, "hunkpad_run_script", { script: "declined" }))).toMatch(/declined/);
+  });
+
+  it("reports an unknown or missing script as a tool error", async () => {
+    const host = fakeHost();
+    const a = await call(host, "hunkpad_run_script", { script: "missing" });
+    expect((a as { result: { isError: boolean } }).result.isError).toBe(true);
+    expect(text(await call(host, "hunkpad_run_script", {}))).toMatch(/script is required/);
   });
 });

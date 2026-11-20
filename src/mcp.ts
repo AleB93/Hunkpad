@@ -26,6 +26,9 @@ export interface McpHost {
   worktreeSetup(): Promise<unknown>;
   setWorktreeSetup(change: { copy?: string[]; command?: string; basePort?: number | null }): Promise<Outcome>;
   runWorktreeSetup(worktree: string): Promise<{ outcome: Outcome } & Record<string, unknown>>;
+  listScripts(): unknown;
+  /** `script`: an id or a name from listScripts. */
+  runScript(script: string): Promise<{ outcome: Outcome } & Record<string, unknown>>;
 }
 
 /** A tool's input is wrong, or what it names does not exist: reported to Claude as a tool error. */
@@ -175,6 +178,22 @@ export const TOOLS = [
       "main folder (never overwriting) and starts the command in a new terminal window. The user approves it in Hunkpad.",
     inputSchema: obj({ worktree: str("The worktree's path, as listed by hunkpad_get_worktree_setup.") }, ["worktree"]),
   },
+  {
+    name: "hunkpad_list_scripts",
+    description:
+      "The user's saved scripts for the active repository (the ▶ buttons in Hunkpad's Scripts row): id, name, what " +
+      "each runs (a script file, or an npm script) and the folder it runs in (the worktree the user is on).",
+    inputSchema: obj({}),
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "hunkpad_run_script",
+    description:
+      "Start one of the user's saved scripts (from hunkpad_list_scripts) in a new terminal window, like its ▶ button. " +
+      "Hunkpad asks the user first, who may decline. The script's output stays in that window: this tool only says " +
+      "whether it started.",
+    inputSchema: obj({ script: str("The script's id, or its name, from hunkpad_list_scripts.") }, ["script"]),
+  },
 ] as const;
 
 type Args = Record<string, unknown>;
@@ -290,6 +309,12 @@ async function callTool(host: McpHost, name: string, args: Args): Promise<unknow
     case "hunkpad_run_worktree_setup": {
       const { outcome, ...rest } = await host.runWorktreeSetup(needString(args, "worktree"));
       return { outcome: outcomeText[outcome], ...rest };
+    }
+    case "hunkpad_list_scripts":
+      return host.listScripts();
+    case "hunkpad_run_script": {
+      const { outcome, ...rest } = await host.runScript(needString(args, "script").trim());
+      return { outcome: outcome === "done" ? "Started in a new window." : outcomeText[outcome], ...rest };
     }
     default:
       throw new ToolError(`unknown tool: ${name}`);

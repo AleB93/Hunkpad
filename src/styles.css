@@ -624,6 +624,49 @@ dialog p { margin: 0; }
   padding: 8px 12px 24px;
   font: 12px Consolas, "Cascadia Mono", monospace;
 }
+/* History: a commit shown in the overview. */
+.ov-commit {
+  margin: 2px 0 10px;
+  padding: 10px 12px;
+  background: var(--bg-side);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  font: 13px "Segoe UI", system-ui, sans-serif;
+}
+.ov-commit .subject { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.ov-commit .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; color: var(--muted); font-size: 12px; }
+.ov-commit .sha { font-family: Consolas, "Cascadia Mono", monospace; color: var(--accent); cursor: pointer; }
+.ov-commit .body { margin: 8px 0 0; white-space: pre-wrap; font: 12px Consolas, "Cascadia Mono", monospace; color: var(--fg); }
+
+/* All changes: the file filter, kept on top while the overview scrolls. */
+#ov-filter-bar {
+  position: sticky;
+  top: -8px; /* over the overview padding */
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: -8px -12px 4px;
+  padding: 8px 12px 6px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  font: 12px "Segoe UI", system-ui, sans-serif;
+}
+#ov-filter-bar .seg { padding: 0; }
+#ov-filter-bar > button { padding: 1px 8px; font-size: 12px; }
+#ov-filter {
+  flex: 1;
+  min-width: 180px;
+  font: 12px Consolas, "Cascadia Mono", monospace;
+  color: var(--fg);
+  background: var(--bg-side);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 7px;
+}
+#ov-filter.invalid { border-color: var(--del); box-shadow: 0 0 0 1px var(--del); }
 .ov-section {
   font: 600 11px "Segoe UI", system-ui, sans-serif;
   text-transform: uppercase;
@@ -1285,3 +1328,83 @@ button:disabled:hover { background: var(--bg-side); }
 /* -- Italia: the tricolore under the top bar -- */
 [data-theme="italia"] #appbar { border-bottom: 4px solid transparent; border-image: linear-gradient(90deg, #009246 0 33.3%, #ffffff 33.3% 66.6%, #ce2b37 66.6%) 1; }
 [data-theme="italia"] #wordmark { color: #009246; }
+
+/* ---- Code to flow (diagram of a commit or the working changes) ---- */
+#flow-dialog {
+  width: min(1400px, 94vw);
+  height: 88vh;
+  max-width: none;
+  padding: 0;
+}
+#flow-dialog[open] { display: flex; flex-direction: column; }
+.flow-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-side);
+}
+.flow-head > button { padding: 2px 9px; }
+#flow-source { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
+#flow-mode {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.flow-body { flex: 1; min-height: 0; display: flex; }
+#flow-diagram {
+  flex: 3;
+  min-width: 0;
+  overflow: auto;
+  padding: 16px;
+  cursor: grab;
+  background:
+    radial-gradient(circle, color-mix(in srgb, var(--fg) 12%, transparent) 1px, transparent 1px) 0 0 / 18px 18px,
+    var(--bg);
+}
+#flow-diagram.dragging { cursor: grabbing; }
+.flow-svg { transform-origin: 0 0; width: max-content; }
+.flow-svg svg { display: block; max-width: none; height: auto; }
+.flow-error { color: var(--del); margin-bottom: 8px; }
+#flow-diagram pre { font: 12px Consolas, "Cascadia Mono", monospace; white-space: pre-wrap; }
+#flow-explain {
+  flex: 2;
+  min-width: 260px;
+  max-width: 520px;
+  overflow: auto;
+  padding: 12px 16px;
+  border-left: 1px solid var(--border);
+  background: var(--bg-side);
+  font-size: 13px;
+  line-height: 1.55;
+}
+#flow-dialog.explain-only #flow-diagram { display: none; }
+#flow-dialog.explain-only #flow-explain { max-width: none; border-left: none; }
+#ov-filter-bar .spacer { flex: 1; }
+#ov-filter-bar .flow-btn { font-weight: 600; color: var(--accent); }
+
+/* ---- History: several commits selected (Ctrl / Shift+click) ---- */
+.commit.picked { background: var(--selected); box-shadow: inset 3px 0 0 var(--accent); }
+.multi-bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-side);
+  border-bottom: 1px solid var(--border);
+}
+.multi-bar .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.multi-bar button { padding: 1px 8px; font-size: 12px; }
+.ov-commit .commit-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.ov-commit .commit-list li { display: flex; gap: 10px; align-items: baseline; font-size: 12px; min-width: 0; }
+.ov-commit .commit-list .subj { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-commit .commit-list .who { color: var(--muted); white-space: nowrap; }
+.ov-commit.multi .meta { display: block; }

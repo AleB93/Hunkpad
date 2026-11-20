@@ -354,6 +354,25 @@
       </form>
     </dialog>
 
+    <!-- Code to flow: a diagram of a commit's or the working changes (flow.ts, claude.ts). -->
+    <dialog id="flow-dialog">
+      <div class="flow-head">
+        <strong id="flow-title">Code to flow</strong>
+        <span id="flow-source" class="small muted"></span>
+        <span class="spacer"></span>
+        <select id="flow-mode" title="Kind of diagram"></select>
+        <button id="flow-regen" type="button" title="Ask Claude again">↻ Regenerate</button>
+        <button id="flow-copy-mermaid" type="button" title="Copy the Mermaid source (paste into Markdown, GitHub, Azure DevOps wikis…)">⧉ Mermaid</button>
+        <button id="flow-copy-svg" type="button" title="Copy the diagram as SVG">⧉ SVG</button>
+        <button id="flow-copy-png" type="button" title="Copy the diagram as an image">⧉ PNG</button>
+        <button id="flow-close" type="button">Close</button>
+      </div>
+      <div class="flow-body">
+        <div id="flow-diagram" title="Ctrl+scroll to zoom, drag to move"></div>
+        <div id="flow-explain" class="markdown-body"></div>
+      </div>
+    </dialog>
+
     <!-- Claude requests (claude.ts). Modes (class on the dialog): send → waiting → result. -->
     <dialog id="claude-dialog">
       <form method="dialog" novalidate>

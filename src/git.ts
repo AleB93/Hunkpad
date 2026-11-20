@@ -1013,6 +1013,11 @@ export class Repo {
     return (await this.read(["log", "-1", "--format=%B", rev], true)).trim();
   }
 
+  /** The patch from `left` to `right` (e.g. a commit against its parent), with renames found. */
+  patchBetween(left: string, right: string): Promise<string> {
+    return this.read(["diff", "--no-color", "--no-ext-diff", "-U3", "-M", left, right], true);
+  }
+
   async changedFiles(left: string, right: string): Promise<ChangedFile[]> {
     return parseNameStatus(await this.read(["diff", "--name-status", "-z", "-M", left, right]));
   }

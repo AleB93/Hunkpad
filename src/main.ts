@@ -31,10 +31,12 @@ import {
 } from "./git";
 import { McpHost, Outcome, ToolError, blockId, handleMcp, installArgs, mcpUrl, newToken, parseBlockId, removeArgs } from "./mcp";
 import { EXTRA_THEMES, applyTokens, editorThemeData, seasonalTheme } from "./themes";
+import { FLOW_MODES, FLOW_SCHEMA, FLOW_SYSTEM, FlowMode, FlowResult, flowPrompt, parseFlow } from "./claude";
+import { renderMermaid, svgToPng } from "./flow";
 import { isMarkdown, isWebLink, markdownToHtml, resolveRepoPath, slug } from "./markdown";
 import { TextMatch, TextSearchOptions, grepArgs, matchRange, parseGrep, rankFiles } from "./search";
 import { LineChange, applyLineChanges, applyLineChangesWithRanges } from "./lineChanges";
-import { PatchFile, parsePatch, untrackedPatch } from "./overview";
+import { PatchFile, PathFilterMode, TESTS_PATTERN, parsePatch, pathFilter, untrackedPatch } from "./overview";
 import { ReviewComment, loadComments, locate, newCommentId, saveComments } from "./comments";
 import { ExportComment, ExportFile, blocksPatch, fenceFor, splitPatch, statusWord, toMarkdown } from "./export";
 import {
@@ -1013,6 +1015,7 @@ async function showDiff(t: DiffTarget, opts: { wholeFile?: boolean } = {}) {
   $("overview").classList.add("hidden");
   $("overview-btn").classList.remove("hidden");
   $("copy-btn").textContent = "⧉ Copy for LLM";
+  $("copy-btn").classList.remove("hidden");
   renderDiffActions();
   markSelected();
   renderCommentZones();
@@ -1906,7 +1909,10 @@ async function askClaude(req: {
   noAsk.checked = false;
   if (claudeAsk) {
     claudeMode("send", { ok: "Send" });
-    if ((await claudeChoice()) !== "ok") return void claudeDialog.close();
+    if ((await claudeChoice()) !== "ok") {
+      claudeDialog.close();
+      return null; // cancelled (callers test for null: undefined would read as an answer)
+    }
     if (noAsk.checked) {
       claudeAsk = false;
       saveFlag("claudeAsk", false);
@@ -2267,6 +2273,218 @@ function explainCommitWithClaude(c: Commit) {
   });
 }
 
+// 7. Code to flow (like codetoflow.com): a diagram of the commit shown in the
+// overview, or of the working changes, filtered like the overview.
+const flowDialog = $<HTMLDialogElement>("flow-dialog");
+const flowModeSel = $<HTMLSelectElement>("flow-mode");
+flowModeSel.replaceChildren(...FLOW_MODES.map((m) => h("option", { value: m.id }, m.label)));
+let flowMode: FlowMode = FLOW_MODES.find((m) => m.id === settings.getItem("flowMode"))?.id ?? "flow";
+flowModeSel.value = flowMode;
+/** Answers already received, by what was sent and the mode: reopening does not ask again. */
+const flowCache = new Map<string, FlowResult>();
+let flowShown: FlowResult | null = null;
+
+/** A short fingerprint of text (to know when the working changes changed). */
+const fingerprint = (text: string) => {
+  let x = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) x = Math.imul(x ^ text.charCodeAt(i), 0x01000193);
+  return (x >>> 0).toString(36);
+};
+
+async function flowFiles(r: Repo): Promise<{ key: string; label: string; files: ExportFile[]; intro?: string }> {
+  const f = ovFilterOf(r.root);
+  const { keep } = pathFilter(f.pattern, f.mode);
+  const filterKey = f.pattern.trim() ? `${f.mode}:${f.pattern}` : "";
+  const mm = ovData?.multi && samePath(ovData.root, r.root) ? ovData.multi : null;
+  if (mm) {
+    // Each commit's full message, then the diff: combined, or per commit.
+    const messages = await Promise.all(mm.commits.map(async (c) => `commit ${c.sha}\nAuthor: ${c.author}\n\n${await r.commitMessage(c.sha)}`));
+    const intro = messages.map((m) => `${fenceFor(m)}\n${m}\n${fenceFor(m)}`).join("\n\n");
+    const files: ExportFile[] = [];
+    for (const s of mm.sections) {
+      const patch = await r.patchBetween(s.left, s.right);
+      const status = mm.contiguous ? `combined change of the ${mm.commits.length} commits` : `in ${s.title}`;
+      for (const ch of splitPatch(patch)) if (keep(ch.path)) files.push({ path: ch.path, status, patch: ch.text, comments: [] });
+    }
+    return {
+      key: `commits:${mm.key}|${filterKey}`,
+      label: `${mm.commits.length} commits${mm.contiguous ? ", combined" : ", each on its own"}`,
+      files,
+      intro,
+    };
+  }
+  const cm = ovData?.commit && samePath(ovData.root, r.root) ? ovData.commit : null;
+  if (cm) {
+    const { header, patch } = await r.commitPatch(cm.sha);
+    const files: ExportFile[] = splitPatch(patch)
+      .filter((ch) => keep(ch.path))
+      .map((ch) => ({ path: ch.path, status: "changed in this commit", patch: ch.text, comments: [] }));
+    return {
+      key: `commit:${cm.sha}|${filterKey}`,
+      label: `commit ${cm.info.shortSha}: ${cm.info.subject}`,
+      files,
+      intro: `${fenceFor(header)}\n${header}\n${fenceFor(header)}`,
+    };
+  }
+  const [staged, unstaged] = await Promise.all([r.diffPatch(true), r.diffPatch(false)]);
+  const files: ExportFile[] = [
+    ...splitPatch(staged).map((ch) => ({ path: ch.path, status: "staged", patch: ch.text, comments: [] })),
+    ...splitPatch(unstaged).map((ch) => ({ path: ch.path, status: "unstaged", patch: ch.text, comments: [] })),
+  ];
+  const untracked = (status?.files ?? []).filter((x) => x.unstaged === "U").map((x) => x.path).slice(0, OV_MAX_UNTRACKED);
+  for (const p of untracked)
+    files.push({ path: p, status: "new file", patch: splitPatch(await r.untrackedPatch(p))[0]?.text ?? "", comments: [] });
+  const kept = files.filter((x) => keep(x.path));
+  return {
+    key: `work:${pathKey(r.root)}:${fingerprint(kept.map((x) => x.patch).join("\n"))}|${filterKey}`,
+    label: "working changes",
+    files: kept,
+  };
+}
+
+function openFlow(regenerate = false) {
+  claudeAction(async () => {
+    const r = repo!;
+    const src = await flowFiles(r);
+    if (!src.files.length) return setStatus("Nothing to draw: no changes (or the filter hides them all)", true);
+    const key = `${src.key}|${flowMode}`;
+    let result = regenerate ? undefined : flowCache.get(key);
+    if (!result) {
+      const picked = await claudeFiles(src.files);
+      if (!picked) return;
+      const { send, skipped } = picked;
+      if (!send.length) return setStatus("Nothing to draw: every changed file is kept local or looks like a secret", true);
+      const changes = toMarkdown({
+        title: `Changes in ${projectName(r.root)}`,
+        meta: [`Repository: ${projectName(r.root)}`, `Scope: ${src.label}`],
+        intro: src.intro,
+        files: send,
+      });
+      const mode = FLOW_MODES.find((m) => m.id === flowMode)!;
+      const answer = await askClaude({
+        title: `${mode.label} of ${src.key.startsWith("commits:") ? src.label.split(",")[0] : src.key.startsWith("commit:") ? "the commit" : "the working changes"} with Claude?`,
+        summary: `${src.label} · ${send.length} file(s)`,
+        // The same path in several commits: say which one.
+        files: send.map((x) => (send.filter((y) => y.path === x.path).length > 1 ? `${x.path} (${x.status})` : x.path)),
+        skipped,
+        prompt: flowPrompt(flowMode, changes),
+        system: FLOW_SYSTEM,
+        schema: FLOW_SCHEMA,
+      });
+      if (answer === null) return;
+      claudeDialog.close();
+      result = parseFlow(answer, flowMode);
+      flowCache.set(key, result);
+    }
+    await showFlow(src.label, result);
+  });
+}
+
+/** Whether the app's background is dark (for Mermaid's own theme). */
+function appIsDark(): boolean {
+  const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(getComputedStyle(document.body).backgroundColor);
+  if (!m) return false;
+  const [r, g, b] = m.slice(1).map(Number);
+  return 0.299 * r + 0.587 * g + 0.114 * b < 128;
+}
+
+let flowZoom = 1;
+async function showFlow(label: string, result: FlowResult) {
+  flowShown = result;
+  $("flow-title").textContent = result.title;
+  $("flow-source").textContent = label;
+  $("flow-explain").replaceChildren(markdownBlock(result.explanation || "_No explanation._"));
+  const pane = $("flow-diagram");
+  const hasDiagram = !!result.mermaid;
+  flowDialog.classList.toggle("explain-only", !hasDiagram);
+  for (const id of ["flow-copy-mermaid", "flow-copy-svg", "flow-copy-png"]) $<HTMLButtonElement>(id).disabled = !hasDiagram;
+  if (!flowDialog.open) flowDialog.showModal();
+  if (!hasDiagram) return pane.replaceChildren();
+  pane.replaceChildren(h("div", { class: "empty" }, "Drawing…"));
+  try {
+    const svg = await renderMermaid(result.mermaid, appIsDark());
+    const holder = h("div", { class: "flow-svg" });
+    holder.innerHTML = svg; // sanitised in flow.ts
+    pane.replaceChildren(holder);
+    // Mermaid draws at "100%" of a shrink-to-fit box: give the SVG its natural size,
+    // then start zoomed to fit the pane's width (never above 1.5×).
+    const el = holder.querySelector("svg");
+    const box = el?.viewBox.baseVal;
+    if (el && box?.width) {
+      el.setAttribute("width", String(Math.ceil(box.width)));
+      el.setAttribute("height", String(Math.ceil(box.height)));
+      el.style.maxWidth = "none";
+      flowZoom = Math.min(1.5, Math.max(0.25, (pane.clientWidth - 32) / box.width));
+    } else flowZoom = 1;
+    holder.style.transform = `scale(${flowZoom})`;
+  } catch (e) {
+    $<HTMLButtonElement>("flow-copy-svg").disabled = true;
+    $<HTMLButtonElement>("flow-copy-png").disabled = true;
+    pane.replaceChildren(
+      h("div", { class: "flow-error" }, `Mermaid could not draw Claude's diagram: ${errorText(e)}. Try ↻ Regenerate.`),
+      h("pre", {}, result.mermaid),
+    );
+  }
+}
+
+// Ctrl+scroll zooms; dragging moves around a large diagram.
+$("flow-diagram").addEventListener(
+  "wheel",
+  (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    const holder = document.querySelector<HTMLElement>("#flow-diagram .flow-svg");
+    if (!holder) return;
+    flowZoom = Math.min(4, Math.max(0.25, flowZoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
+    holder.style.transform = `scale(${flowZoom})`;
+  },
+  { passive: false },
+);
+$("flow-diagram").addEventListener("pointerdown", (e) => {
+  const pane = e.currentTarget as HTMLElement;
+  if (e.button !== 0 || !pane.querySelector(".flow-svg")) return;
+  const start = { x: e.clientX, y: e.clientY, left: pane.scrollLeft, top: pane.scrollTop };
+  pane.setPointerCapture(e.pointerId);
+  pane.classList.add("dragging");
+  const move = (ev: PointerEvent) => {
+    pane.scrollLeft = start.left - (ev.clientX - start.x);
+    pane.scrollTop = start.top - (ev.clientY - start.y);
+  };
+  const end = () => {
+    pane.classList.remove("dragging");
+    pane.removeEventListener("pointermove", move);
+  };
+  pane.addEventListener("pointermove", move);
+  pane.addEventListener("pointerup", end, { once: true });
+  pane.addEventListener("pointercancel", end, { once: true });
+});
+
+flowModeSel.addEventListener("change", () => {
+  flowMode = flowModeSel.value as FlowMode;
+  settings.setItem("flowMode", flowMode);
+  openFlow();
+});
+$("flow-regen").addEventListener("click", () => openFlow(true));
+$("flow-close").addEventListener("click", () => flowDialog.close());
+$("flow-copy-mermaid").addEventListener("click", () => {
+  if (flowShown?.mermaid) navigator.clipboard.writeText(flowShown.mermaid).then(() => setStatus("Copied the Mermaid source"));
+});
+$("flow-copy-svg").addEventListener("click", () => {
+  const svg = document.querySelector("#flow-diagram svg");
+  if (svg) navigator.clipboard.writeText(svg.outerHTML).then(() => setStatus("Copied the diagram as SVG"));
+});
+$("flow-copy-png").addEventListener("click", async () => {
+  const svg = document.querySelector<SVGSVGElement>("#flow-diagram svg");
+  if (!svg) return;
+  try {
+    const png = await svgToPng(svg);
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+    setStatus("Copied the diagram as an image");
+  } catch (e) {
+    setStatus(`Could not copy the image: ${errorText(e)}`, true);
+  }
+});
+
 // 6. Merge conflicts: Claude proposes the resolved file; applied only when accepted.
 function resolveConflictWithClaude(f: FileChange) {
   claudeAction(async () => {
@@ -2340,17 +2558,26 @@ function revealLine(line: number, side: "original" | "modified") {
   editor.focus();
 }
 
-function overviewFile(f: PatchFile, staged: boolean): HTMLElement {
-  const fileStatus = status?.files.find((x) => x.path === f.path);
-  const t: DiffTarget = staged
-    ? { kind: "index", path: f.path, origPath: f.oldPath }
-    : { kind: "worktree", path: f.path, conflict: !!fileStatus?.conflict };
+/** `commit`: the file is part of a commit's overview (History), opened as that commit's diff. */
+function overviewFile(
+  f: PatchFile,
+  staged: boolean,
+  commit?: { left: string; right: string; label: string; letter: string },
+): HTMLElement {
+  const fileStatus = commit ? undefined : status?.files.find((x) => x.path === f.path);
+  const t: DiffTarget = commit
+    ? { kind: "tree", left: commit.left, right: commit.right, path: f.path, origPath: f.oldPath, label: commit.label }
+    : staged
+      ? { kind: "index", path: f.path, origPath: f.oldPath }
+      : { kind: "worktree", path: f.path, conflict: !!fileStatus?.conflict };
   const open = (line?: number, side: "original" | "modified" = "modified") =>
     showDiff(t)
       .then(() => line && revealLine(line, side))
       .catch(showError);
 
-  const letter = (staged ? fileStatus?.staged : fileStatus?.unstaged) ?? (fileStatus?.conflict ? "!" : "");
+  const letter = commit
+    ? commit.letter
+    : ((staged ? fileStatus?.staged : fileStatus?.unstaged) ?? (fileStatus?.conflict ? "!" : ""));
   const slash = f.path.lastIndexOf("/");
   const head = h(
     "div",
@@ -2406,6 +2633,46 @@ async function renderOverview() {
     return;
   }
   const token = ++overviewToken;
+  if (overviewCommit && !samePath(overviewCommit.root, r.root)) overviewCommit = null; // another tab
+  if (overviewCommits && !samePath(overviewCommits.root, r.root)) overviewCommits = null;
+  if (overviewCommits) {
+    const list = overviewCommits.commits;
+    const key = list.map((c) => c.sha).join(",");
+    if (ovData?.multi?.key !== key || !samePath(ovData.root, r.root)) {
+      const loaded = await loadCommitSections(r, list);
+      if (token !== overviewToken || repo !== r || target || overviewCommits?.commits.map((c) => c.sha).join(",") !== key) return;
+      ovData = { root: r.root, staged: [], unstaged: [], kept: [], moreUntracked: 0, multi: { key, commits: list, ...loaded } };
+    }
+    drawOverview();
+    el.classList.remove("hidden");
+    $("placeholder").classList.add("hidden");
+    return;
+  }
+  if (overviewCommit) {
+    const c = overviewCommit.commit;
+    // A commit never changes: load it once.
+    if (ovData?.commit?.sha !== c.sha || !samePath(ovData.root, r.root)) {
+      const left = c.parents[0] ?? EMPTY_TREE;
+      const [patch, files, message] = await Promise.all([
+        r.patchBetween(left, c.sha),
+        r.changedFiles(left, c.sha),
+        r.commitMessage(c.sha),
+      ]);
+      if (token !== overviewToken || repo !== r || target || overviewCommit?.commit.sha !== c.sha) return;
+      ovData = {
+        root: r.root,
+        staged: [],
+        unstaged: parsePatch(patch),
+        kept: [],
+        moreUntracked: 0,
+        commit: { sha: c.sha, info: c, message, left, letters: new Map(files.map((x) => [x.path, x.status[0]])) },
+      };
+    }
+    drawOverview();
+    el.classList.remove("hidden");
+    $("placeholder").classList.add("hidden");
+    return;
+  }
   const untrackedPaths = (status?.files ?? []).filter((f) => f.unstaged === "U").map((f) => f.path);
   const [stagedOut, unstagedOut, untracked] = await Promise.all([
     r.diffPatch(true),
@@ -2418,30 +2685,271 @@ async function renderOverview() {
   ]);
   if (token !== overviewToken || repo !== r || target) return; // superseded
 
-  const staged = parsePatch(stagedOut);
   const kept = new Set(loadKeptLocal(r.root));
   const allUnstaged = [...parsePatch(unstagedOut), ...untracked];
-  const unstaged = allUnstaged.filter((f) => !kept.has(f.path));
-  const keptFiles = allUnstaged.filter((f) => kept.has(f.path));
-  const nodes: HTMLElement[] = [];
-  const section = (title: string, files: PatchFile[], isStaged: boolean, empty: string) => {
-    nodes.push(h("div", { class: "ov-section" }, `${title} · ${files.length} file${files.length === 1 ? "" : "s"}`));
-    nodes.push(...files.map((f) => overviewFile(f, isStaged)));
-    if (!files.length) nodes.push(h("div", { class: "ov-note" }, empty));
+  ovData = {
+    root: r.root,
+    staged: parsePatch(stagedOut),
+    unstaged: allUnstaged.filter((f) => !kept.has(f.path)),
+    kept: allUnstaged.filter((f) => kept.has(f.path)),
+    moreUntracked: Math.max(0, untrackedPaths.length - OV_MAX_UNTRACKED),
   };
-  section("Staged", staged, true, "Nothing staged.");
-  section("Unstaged", unstaged, false, "No unstaged changes.");
-  if (keptFiles.length) section("Kept local (never staged)", keptFiles, false, "");
-  if (untrackedPaths.length > OV_MAX_UNTRACKED) {
-    nodes.push(h("div", { class: "ov-note" }, `${untrackedPaths.length - OV_MAX_UNTRACKED} more new files not shown here.`));
-  }
-
-  const scroll = el.scrollTop;
-  el.replaceChildren(...nodes);
-  el.scrollTop = scroll;
+  drawOverview();
   el.classList.remove("hidden");
   $("placeholder").classList.add("hidden");
 }
+
+// ---- All changes: filter the files by a regular expression on their path ------
+//
+// Remembered per repository. Filtering redraws what was loaded; nothing is re-read.
+
+/** The last loaded overview, drawn again when the filter changes. With `commit`: a commit's changes (History). */
+let ovData: {
+  root: string;
+  staged: PatchFile[];
+  unstaged: PatchFile[];
+  kept: PatchFile[];
+  moreUntracked: number;
+  commit?: { sha: string; info: Commit; message: string; left: string; letters: Map<string, string> };
+  /** Several History commits: one combined section when they follow each other, else one per commit. */
+  multi?: { key: string; commits: Commit[]; contiguous: boolean; sections: CommitSection[] };
+} | null = null;
+
+/** Files changed between two revisions, shown as one overview section. */
+type CommitSection = { title: string; left: string; right: string; label: string; files: PatchFile[]; letters: Map<string, string> };
+
+/** The History commit(s) whose changes the overview shows (instead of the working changes). */
+let overviewCommit: { root: string; commit: Commit } | null = null;
+let overviewCommits: { root: string; commits: Commit[] } | null = null;
+
+/** At most this many commits at once (each one is read). */
+const MAX_MULTI_COMMITS = 30;
+
+/** Shows one or more commits' changes in the overview (newest first), or (null / []) the working changes again. */
+function showCommitOverview(c: Commit | Commit[] | null) {
+  const list = c === null ? [] : Array.isArray(c) ? c : [c];
+  overviewCommit = list.length === 1 && repo ? { root: repo.root, commit: list[0] } : null;
+  overviewCommits = list.length > 1 && repo ? { root: repo.root, commits: list } : null;
+  if (target) clearDiff(); // back to the overview, which draws the commit(s)
+  else renderOverview().catch(showError);
+  $("overview-btn").title =
+    list.length === 1 ? `Back to commit ${list[0].shortSha} (Esc)` : list.length ? `Back to the ${list.length} commits (Esc)` : "Back to the overview of all changes (Esc)";
+}
+
+const letterMap = (files: ChangedFile[]) => new Map(files.map((x) => [x.path, x.status[0]]));
+
+/** Loads the sections for several commits (newest first): combined when each one's parent is the next. */
+async function loadCommitSections(r: Repo, list: Commit[]): Promise<{ contiguous: boolean; sections: CommitSection[] }> {
+  const contiguous = list.every((c, i) => i === list.length - 1 || c.parents[0] === list[i + 1].sha);
+  if (contiguous) {
+    const oldest = list[list.length - 1];
+    const newest = list[0];
+    const left = oldest.parents[0] ?? EMPTY_TREE;
+    const [patch, files] = await Promise.all([r.patchBetween(left, newest.sha), r.changedFiles(left, newest.sha)]);
+    return {
+      contiguous,
+      sections: [
+        {
+          title: `Changed in these ${list.length} commits, combined`,
+          left,
+          right: newest.sha,
+          label: `${oldest.shortSha}^..${newest.shortSha}`,
+          files: parsePatch(patch),
+          letters: letterMap(files),
+        },
+      ],
+    };
+  }
+  const sections = await Promise.all(
+    list.map(async (c) => {
+      const left = c.parents[0] ?? EMPTY_TREE;
+      const [patch, files] = await Promise.all([r.patchBetween(left, c.sha), r.changedFiles(left, c.sha)]);
+      return { title: `${c.shortSha} · ${c.subject}`, left, right: c.sha, label: c.shortSha, files: parsePatch(patch), letters: letterMap(files) };
+    }),
+  );
+  return { contiguous, sections };
+}
+
+type OvFilter = { pattern: string; mode: PathFilterMode };
+const ovFilters = (): Record<string, OvFilter> => {
+  try {
+    return JSON.parse(settings.getItem("overviewFilters") ?? "{}") as Record<string, OvFilter>;
+  } catch {
+    return {};
+  }
+};
+const ovFilterOf = (root: string): OvFilter => ovFilters()[pathKey(root)] ?? { pattern: "", mode: "hide" };
+function saveOvFilter(root: string, f: OvFilter) {
+  const all = ovFilters();
+  if (f.pattern.trim()) all[pathKey(root)] = f;
+  else delete all[pathKey(root)];
+  settings.setItem("overviewFilters", JSON.stringify(all));
+}
+
+const ovInput = h("input", {
+  id: "ov-filter",
+  type: "search",
+  placeholder: "Filter files by path (regex), e.g. test|spec",
+  autocomplete: "off",
+  spellcheck: false,
+}) as HTMLInputElement;
+const ovModeBtns = (["hide", "only"] as PathFilterMode[]).map(
+  (mode) =>
+    h(
+      "button",
+      { type: "button", "data-mode": mode, title: mode === "hide" ? "Leave out the files that match" : "Show only the files that match" },
+      mode === "hide" ? "Hide matching" : "Show only",
+    ) as HTMLButtonElement,
+);
+const ovBar = h(
+  "div",
+  { id: "ov-filter-bar" },
+  ovInput,
+  h("div", { class: "seg" }, ...ovModeBtns),
+  h("button", { type: "button", title: `Hide test files and folders\n${TESTS_PATTERN}`, onclick: () => setOvFilter({ pattern: TESTS_PATTERN, mode: "hide" }) }, "Hide tests"),
+  iconBtn("✕", "Clear the filter", () => setOvFilter({ pattern: "", mode: ovFilterOf(ovData?.root ?? "").mode })),
+  h("span", { class: "spacer" }),
+  h(
+    "button",
+    {
+      type: "button",
+      class: "flow-btn",
+      title: "Code to flow: a diagram (and walkthrough) of these changes, made by Claude. Uses the filter.",
+      onclick: () => openFlow(),
+    },
+    "⤳ Flow",
+  ),
+);
+const ovBody = h("div", { id: "ov-body" });
+/** Which repository's filter the bar shows now. */
+let ovBarRoot: string | null = null;
+
+function setOvFilter(f: OvFilter) {
+  if (!ovData) return;
+  saveOvFilter(ovData.root, f);
+  ovInput.value = f.pattern;
+  drawOverview();
+  ovInput.focus();
+}
+
+ovInput.addEventListener("input", () => {
+  if (ovData) saveOvFilter(ovData.root, { pattern: ovInput.value, mode: ovFilterOf(ovData.root).mode });
+  drawOverview();
+});
+ovInput.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && ovInput.value) {
+    e.stopPropagation();
+    setOvFilter({ pattern: "", mode: ovFilterOf(ovData?.root ?? "").mode });
+  }
+});
+for (const b of ovModeBtns)
+  b.addEventListener("click", () => setOvFilter({ pattern: ovInput.value, mode: b.dataset.mode as PathFilterMode }));
+
+function drawOverview() {
+  const el = $("overview");
+  const d = ovData;
+  if (!d || !repo || !samePath(d.root, repo.root)) return;
+  const f = ovFilterOf(d.root);
+  if (ovBarRoot !== d.root) {
+    ovBarRoot = d.root;
+    ovInput.value = f.pattern;
+  }
+  const { keep, error } = pathFilter(f.pattern, f.mode);
+  ovInput.classList.toggle("invalid", !!error);
+  ovInput.title = error ? `Not a valid regular expression: ${error}` : "Regular expression, matched against each file's path (case-insensitive)";
+  for (const b of ovModeBtns) b.classList.toggle("active", b.dataset.mode === f.mode);
+
+  const nodes: HTMLElement[] = [];
+  const cm = d.commit;
+  const asCommit = (x: PatchFile) =>
+    cm ? { left: cm.left, right: cm.sha, label: cm.info.shortSha, letter: cm.letters.get(x.path) ?? "M" } : undefined;
+  const section = (
+    title: string,
+    files: PatchFile[],
+    isStaged: boolean,
+    empty: string,
+    inCommit: (x: PatchFile) => ReturnType<typeof asCommit> = asCommit,
+  ) => {
+    const shown = files.filter((x) => keep(x.path));
+    const count = shown.length === files.length ? `${files.length}` : `${shown.length} of ${files.length}`;
+    nodes.push(h("div", { class: "ov-section" }, `${title} · ${count} file${files.length === 1 ? "" : "s"}`));
+    nodes.push(...shown.map((x) => overviewFile(x, isStaged, inCommit(x))));
+    if (!files.length) nodes.push(h("div", { class: "ov-note" }, empty));
+    else if (!shown.length) nodes.push(h("div", { class: "ov-note" }, `All ${files.length} hidden by the filter.`));
+  };
+  const mm = d.multi;
+  if (mm) {
+    const oldest = mm.commits[mm.commits.length - 1];
+    nodes.push(
+      h(
+        "div",
+        { class: "ov-commit multi" },
+        h("div", { class: "subject" }, `${mm.commits.length} commits`),
+        h(
+          "div",
+          { class: "meta" },
+          mm.contiguous
+            ? `They follow each other: one combined change, from before ${oldest.shortSha} to ${mm.commits[0].shortSha}.`
+            : "Not consecutive: each commit's changes are shown on their own, so nothing from the commits in between is mixed in.",
+        ),
+        h(
+          "ul",
+          { class: "commit-list" },
+          ...mm.commits.map((c) =>
+            h(
+              "li",
+              {},
+              h("span", { class: "sha", title: `${c.sha}\nClick to copy`, onclick: () => navigator.clipboard.writeText(c.sha).then(() => setStatus(`Copied ${c.sha}`)) }, c.shortSha),
+              h("span", { class: "subj" }, c.subject),
+              h("span", { class: "who" }, `${c.author} · ${c.date.toLocaleDateString()}`),
+            ),
+          ),
+        ),
+      ),
+    );
+    for (const s of mm.sections)
+      section(s.title, s.files, false, "No file changes.", (x) => ({ left: s.left, right: s.right, label: s.label, letter: s.letters.get(x.path) ?? "M" }));
+  } else if (cm) {
+    const c = cm.info;
+    const [subject, ...rest] = cm.message.split("\n");
+    const body = rest.join("\n").trim();
+    nodes.push(
+      h(
+        "div",
+        { class: "ov-commit" },
+        h("div", { class: "subject" }, subject || c.subject),
+        h(
+          "div",
+          { class: "meta" },
+          h("span", { class: "sha", title: `${c.sha}\nClick to copy`, onclick: () => navigator.clipboard.writeText(c.sha).then(() => setStatus(`Copied ${c.sha}`)) }, c.shortSha),
+          h("span", {}, c.author),
+          h("span", {}, c.date.toLocaleString()),
+          ...(c.parents.length > 1 ? [h("span", { class: "badge", title: "Shown against its first parent" }, `merge of ${c.parents.length}`)] : []),
+          ...c.refs.split(", ").filter(Boolean).map((ref) => h("span", { class: "badge" }, ref.replace("HEAD -> ", "⎇ "))),
+        ),
+        body ? h("pre", { class: "body" }, body) : null,
+      ),
+    );
+    section("Changed in this commit", d.unstaged, false, c.parents.length > 1 ? "No changes against the first parent." : "No file changes.");
+  } else {
+    section("Staged", d.staged, true, "Nothing staged.");
+    section("Unstaged", d.unstaged, false, "No unstaged changes.");
+    if (d.kept.length) section("Kept local (never staged)", d.kept, false, "");
+    if (d.moreUntracked) nodes.push(h("div", { class: "ov-note" }, `${d.moreUntracked} more new files not shown here.`));
+  }
+  // "Copy all for LLM" copies the working changes: not offered over commits.
+  $("copy-btn").classList.toggle("hidden", !!cm || !!mm);
+
+  const drawn = mm ? `commits:${mm.key}` : cm ? `commit:${cm.sha}` : `work:${d.root}`;
+  const scroll = drawn === lastDrawn ? el.scrollTop : 0;
+  lastDrawn = drawn;
+  if (ovBar.parentElement !== el) el.replaceChildren(ovBar, ovBody);
+  ovBody.replaceChildren(...nodes);
+  el.scrollTop = scroll;
+}
+
+/** What the overview drew last, so a redraw of the same thing keeps its scroll. */
+let lastDrawn = "";
 
 $("overview-btn").addEventListener("click", clearDiff);
 
@@ -4322,26 +4830,94 @@ function commitMenu(c: Commit): MenuItem[] {
     { label: "Copy commit for LLM (message + diff)", run: () => copyCommit(c) },
     ...(claudeOn ? [{ label: "✨ Explain with Claude", run: () => explainCommitWithClaude(c) }] : []),
     { label: "Copy SHA", run: () => navigator.clipboard.writeText(c.sha) },
+    "-",
+    {
+      label: "⤳ Code to flow…",
+      run: () => {
+        expanded = c.sha;
+        showCommitOverview(c);
+        renderHistory().catch(showError);
+        // Once the overview holds this commit, draw its flow.
+        const wait = (n: number): unknown =>
+          ovData?.commit?.sha === c.sha ? openFlow() : n > 0 && setTimeout(() => wait(n - 1), 150);
+        wait(40);
+      },
+    },
   ];
+}
+
+// Several commits: Ctrl+click adds or removes one, Shift+click a range. Their
+// changes show together in the overview (and ⤳ Flow draws them together).
+let multiSel: string[] = [];
+let selAnchor: string | null = null;
+
+/** Applies a selection of commit SHAs: 2+ → their changes together, 1 → that commit, 0 → the working changes. */
+function selectCommits(shas: string[]) {
+  let list = commits.filter((c) => shas.includes(c.sha)); // newest first, like the log
+  if (list.length > MAX_MULTI_COMMITS) {
+    setStatus(`At most ${MAX_MULTI_COMMITS} commits at once`, true);
+    list = list.slice(0, MAX_MULTI_COMMITS);
+  }
+  if (list.length >= 2) {
+    multiSel = list.map((c) => c.sha);
+    expanded = null;
+    showCommitOverview(list);
+  } else {
+    multiSel = [];
+    expanded = list[0]?.sha ?? null;
+    showCommitOverview(list[0] ?? null);
+  }
+  renderHistory().catch(showError);
+}
+
+function clickCommit(e: MouseEvent, c: Commit) {
+  const isOpen = expanded === c.sha;
+  if (primaryKey(e) || e.shiftKey) {
+    // Grow from what is selected: the multi-selection, else the one open commit.
+    const sel = new Set(multiSel.length ? multiSel : expanded ? [expanded] : []);
+    const anchor = selAnchor ?? expanded;
+    if (e.shiftKey && anchor) {
+      const a = commits.findIndex((x) => x.sha === anchor);
+      const b = commits.findIndex((x) => x.sha === c.sha);
+      for (let i = Math.min(a, b); i <= Math.max(a, b); i++) if (i >= 0) sel.add(commits[i].sha);
+    } else {
+      if (sel.has(c.sha)) sel.delete(c.sha);
+      else sel.add(c.sha);
+      selAnchor = c.sha;
+    }
+    return selectCommits([...sel]);
+  }
+  selAnchor = c.sha;
+  selectCommits(isOpen && !multiSel.length ? [] : [c.sha]);
 }
 
 async function renderHistory() {
   const panel = $("panel-history");
   const scroll = panel.scrollTop;
   const rows: HTMLElement[] = [];
+  if (multiSel.length >= 2)
+    rows.push(
+      h(
+        "div",
+        { class: "multi-bar" },
+        h("strong", {}, `${multiSel.length} commits selected`),
+        h("span", { class: "small muted spacer" }, `${keys("Ctrl")}+click to add or remove · Shift+click for a range`),
+        h("button", { type: "button", title: "Code to flow of the selected commits", onclick: () => openFlow() }, "⤳ Flow"),
+        iconBtn("✕", "Clear the selection", () => selectCommits([])),
+      ),
+    );
   for (const c of commits) {
     const isOpen = expanded === c.sha;
+    const picked = multiSel.includes(c.sha);
     rows.push(
       withContextMenu(
         h(
           "div",
           {
-            class: `commit${isOpen ? " expanded" : ""}`,
-            title: c.subject,
-            onclick: () => {
-              expanded = isOpen ? null : c.sha;
-              renderHistory().catch(showError);
-            },
+            class: `commit${isOpen ? " expanded" : ""}${picked ? " picked" : ""}`,
+            title: `${c.subject}\n${keys("Ctrl")}+click to select several commits, Shift+click for a range`,
+            onmousedown: (e: MouseEvent) => e.shiftKey && e.preventDefault(), // no text selection on Shift+click
+            onclick: (e: MouseEvent) => clickCommit(e, c),
           },
           h("div", { class: "row" }, h("span", { class: "subject spacer" }, c.subject), menuButton(() => commitMenu(c))),
           h(
@@ -4394,10 +4970,16 @@ function checkoutAct(name: string, run: () => Promise<void>) {
 
 async function checkoutRef(ref: Ref, refs: Ref[]) {
   const r = repo!;
-  if (ref.kind === "local") return checkoutAct(ref.name, () => r.checkout(ref.name));
   if (ref.kind === "tag") return checkoutAct(ref.name, () => r.checkoutDetached(ref.name));
-  // Remote branch: switch to the local one if it exists, else create a tracking branch.
-  const localName = ref.name.slice(ref.name.indexOf("/") + 1);
+  // A remote branch checks out (or creates) the local branch of the same name.
+  const localName = ref.kind === "local" ? ref.name : ref.name.slice(ref.name.indexOf("/") + 1);
+  // Git refuses a branch that another worktree has checked out: go to that worktree instead.
+  const elsewhere = worktreeWith(localName);
+  if (elsewhere) {
+    setStatus(`${localName} is checked out in the worktree ${folderName(elsewhere.path)}: switched to it`);
+    return openWorktree(elsewhere);
+  }
+  if (ref.kind === "local") return checkoutAct(ref.name, () => r.checkout(ref.name));
   const local = refs.find((x) => x.kind === "local" && x.name === localName);
   return checkoutAct(localName, () => (local ? r.checkout(localName) : r.checkoutTracking(ref.name)));
 }
@@ -5238,6 +5820,10 @@ async function stashRows(r: Repo, st: Stash): Promise<HTMLElement[]> {
 
 async function showTab(tab: Tab) {
   activeTab = tab;
+  if (tab !== "history" && (overviewCommit || overviewCommits)) {
+    multiSel = [];
+    showCommitOverview(null);
+  }
   document.querySelectorAll<HTMLElement>("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   for (const t of ["changes", "history", "branches", "stashes", "comments"] as Tab[]) {
     $(`panel-${t}`).classList.toggle("hidden", t !== tab);
@@ -5314,9 +5900,10 @@ function renderScripts() {
   );
 }
 
-async function runScript(s: UserScript) {
+/** Starts a saved script in a new window; true when it started. */
+async function runScript(s: UserScript): Promise<boolean> {
   const r = repo;
-  if (!r) return;
+  if (!r) return false;
   try {
     const roots = [...worktrees.map((w) => w.path), scriptHome(r.root), r.root];
     let path = inWorktree(s.path, roots, r.root);
@@ -5329,8 +5916,10 @@ async function runScript(s: UserScript) {
     }
     await invoke("launch_script", { cwd: r.root, script: path, npm: s.npm ?? null, env: envFor(r.root) });
     setStatus(`Started “${s.name}” in a new window (in ${folderName(r.root)}${note})`);
+    return true;
   } catch (e) {
     setStatus(`Could not start “${s.name}”: ${errorText(e)}`, true);
+    return false;
   }
 }
 
@@ -6589,6 +7178,45 @@ const mcpHost: McpHost = {
     if (!ok) return { outcome: "cancelled" };
     const result = await runSetup(w.path, s);
     return result ? { outcome: "done", ...result } : { outcome: "failed" };
+  },
+
+  listScripts() {
+    const r = needRepo();
+    const home = scriptHome(r.root);
+    const scripts = scriptEntries(r.root).map(({ s, owner }) => ({
+      id: s.id,
+      name: s.name,
+      runs: s.npm ? `npm run ${s.npm}` : s.path,
+      kind: s.npm ? "npm script" : "script file",
+      ...(s.npm ? { packageJson: s.path } : {}),
+      savedFor: samePath(owner, home) ? "the repository (every worktree)" : "this worktree only",
+    }));
+    return {
+      repo: r.root,
+      runsIn: r.root,
+      scripts,
+      note: scripts.length ? "Run one with hunkpad_run_script; the user approves it first." : "No scripts saved: the user adds them with + Script in Hunkpad.",
+    };
+  },
+
+  async runScript(wanted) {
+    const r = needRepo();
+    const entries = scriptEntries(r.root);
+    const lower = wanted.toLowerCase();
+    const e = entries.find((x) => x.s.id === wanted) ?? entries.find((x) => x.s.name.toLowerCase() === lower);
+    if (!e) {
+      const names = entries.map((x) => `“${x.s.name}” (${x.s.id})`).join(", ");
+      throw new ToolError(`No script “${wanted}” in ${folderName(r.root)}. Scripts: ${names || "none"}`);
+    }
+    const s = e.s;
+    const what = s.npm ? `npm run ${s.npm}\n(in the folder of ${s.path})` : s.path;
+    const ok = await ask(`Claude Code wants to run the script “${s.name}” in a new window:\n\n${what}\n\nin ${r.root}`, {
+      title: "Hunkpad",
+      okLabel: "Run it",
+      cancelLabel: "Decline",
+    });
+    if (!ok) return { outcome: "cancelled" };
+    return (await runScript(s)) ? { outcome: "done", script: s.name, folder: r.root } : { outcome: "failed", script: s.name };
   },
 
   async switchRepo(root) {

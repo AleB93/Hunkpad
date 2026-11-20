@@ -90,6 +90,8 @@ what I have open in Hunkpad"* or *"split my changes into groups"*.
 | `hunkpad_open_file` | show a file (at a line) in Hunkpad |
 | `hunkpad_stage_group` · `commit_group` | stage or commit one group, **after you approve the Git command in Hunkpad** |
 | `hunkpad_switch_repo` | switch to another open tab |
+| `hunkpad_list_scripts` | the repository's saved scripts (the ▶ buttons) and where they run |
+| `hunkpad_run_script` | start one in a new window, **after you approve it in Hunkpad** |
 
 The server listens on `127.0.0.1:47821` only and needs a secret token (stored
 in Hunkpad's settings and in Claude Code's config); requests from web pages

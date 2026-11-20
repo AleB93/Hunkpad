@@ -100,3 +100,30 @@ export function untrackedPatch(path: string, content: string | null, maxLines: n
     .map((text, i) => ({ kind: "+", text: text.replace(/\r$/, ""), oldNo: null, newNo: i + 1 }));
   return { path, oldPath: null, binary: false, hunks: [{ context: "new file", lines }], added: all.length, removed: 0 };
 }
+
+// ---- filtering the overview by file path -----------------------------------
+
+/** "hide": leave out the files that match; "only": show just those. */
+export type PathFilterMode = "hide" | "only";
+
+/**
+ * Test folders and files in the usual layouts: tests/, test/, __tests__/, spec/;
+ * .NET test projects (Foo.Tests/, Foo.UnitTests/, Foo.IntegrationTests/);
+ * *.test.ts, *.spec.js, *_test.go, *_spec.rb, test_*.py.
+ */
+export const TESTS_PATTERN = String.raw`(^|/)(tests?|__tests__|specs?|testing)/|(^|/)[^/]*\.(unit|integration|e2e)?tests?/|\.(test|spec)s?\.[^/]+$|_(test|spec)\.[^/]+$|(^|/)test_[^/]+\.py$`;
+
+/**
+ * The path test for `pattern` (a regular expression, case-insensitive). An
+ * empty pattern keeps every file; an invalid one too, with the reason in `error`.
+ */
+export function pathFilter(pattern: string, mode: PathFilterMode): { keep: (path: string) => boolean; error: string | null } {
+  if (!pattern.trim()) return { keep: () => true, error: null };
+  let re: RegExp;
+  try {
+    re = new RegExp(pattern, "i");
+  } catch (e) {
+    return { keep: () => true, error: e instanceof Error ? e.message : String(e) };
+  }
+  return { keep: (path) => re.test(path) === (mode === "only"), error: null };
+}

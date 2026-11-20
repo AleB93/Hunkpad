@@ -496,3 +496,69 @@ export function parseSetupSuggestion(answer: unknown, untracked: string[]): Setu
   const port = typeof a.basePort === "number" && Number.isInteger(a.basePort) && a.basePort > 0 && a.basePort <= 65000 ? a.basePort : null;
   return { copy, command, basePort: port, explanation: typeof a.explanation === "string" ? a.explanation.trim() : "" };
 }
+
+// ---- Code to flow: a diagram of what a set of changes does ------------------
+//
+// Like codetoflow.com, but for a commit or the working changes, through the
+// user's own claude CLI. Claude answers Mermaid text; Hunkpad draws it.
+
+export type FlowMode = "flow" | "sequence" | "class" | "explain";
+
+export const FLOW_MODES: { id: FlowMode; label: string; diagram: string | null }[] = [
+  { id: "flow", label: "Flow diagram", diagram: "flowchart" },
+  { id: "sequence", label: "Sequence diagram", diagram: "sequenceDiagram" },
+  { id: "class", label: "Class diagram", diagram: "classDiagram" },
+  { id: "explain", label: "Explain only", diagram: null },
+];
+
+export const FLOW_SYSTEM =
+  "You turn code changes into a diagram that helps a developer understand them, like codetoflow.com. " +
+  "Diagram the behaviour the changed code implements or alters (the runtime logic, calls and data flow), " +
+  "not the list of files. Mark what the change adds or alters, e.g. with a ✚ or ✎ in the node label. " +
+  "Answer valid Mermaid only in the mermaid field, no code fences, at most about 40 nodes; keep labels short " +
+  "and wrap them in double quotes. The explanation is short Markdown that walks through the diagram.";
+
+export const FLOW_SCHEMA = {
+  type: "object",
+  properties: {
+    title: { type: "string", description: "One-line title for the diagram." },
+    mermaid: { type: "string", description: "Mermaid source, without code fences. Empty for Explain only." },
+    explanation: { type: "string", description: "Short Markdown walking through the diagram." },
+  },
+  required: ["title", "mermaid", "explanation"],
+  additionalProperties: false,
+};
+
+export function flowPrompt(mode: FlowMode, changes: string): string {
+  const what: Record<FlowMode, string> = {
+    flow: "Draw a Mermaid flowchart (`flowchart TD`) of the control flow and logic these changes implement or alter.",
+    sequence: "Draw a Mermaid sequence diagram (`sequenceDiagram`) of the calls between components that these changes implement or alter.",
+    class: "Draw a Mermaid class diagram (`classDiagram`) of the types, fields, methods and relations these changes add or alter.",
+    explain: "Do not draw a diagram (leave mermaid empty). Explain step by step what these changes do at runtime.",
+  };
+  return `${what[mode]}\n\n${changes}`;
+}
+
+export interface FlowResult {
+  title: string;
+  mermaid: string;
+  explanation: string;
+}
+
+/** Checks Claude's answer: strips stray code fences, and the diagram must be the kind asked for. */
+export function parseFlow(answer: unknown, mode: FlowMode): FlowResult {
+  const a = (answer ?? {}) as Record<string, unknown>;
+  if (typeof a.mermaid !== "string" || typeof a.explanation !== "string") throw new ClaudeError("Claude returned no diagram");
+  const title = typeof a.title === "string" && a.title.trim() ? a.title.trim() : "Code flow";
+  let mermaid = a.mermaid.replace(/\r\n/g, "\n").trim();
+  const fenced = /^```(?:mermaid)?\s*\n([\s\S]*?)\n?```$/.exec(mermaid);
+  if (fenced) mermaid = fenced[1].trim();
+  const explanation = a.explanation.replace(/\r\n/g, "\n").trim();
+  const want = FLOW_MODES.find((m) => m.id === mode)!.diagram;
+  if (want === null) return { title, mermaid: "", explanation };
+  // The first line that is not a comment or directive names the diagram type.
+  const first = mermaid.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("%%")) ?? "";
+  const kind = want === "flowchart" ? /^(flowchart|graph)\b/ : new RegExp(`^${want}\\b`);
+  if (!kind.test(first)) throw new ClaudeError(`Claude returned a diagram that is not a ${want}`);
+  return { title, mermaid, explanation };
+}
