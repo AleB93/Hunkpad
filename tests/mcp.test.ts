@@ -38,6 +38,8 @@ function fakeHost(): McpHost & { calls: unknown[][] } {
       if (s === "missing") throw new ToolError("No script “missing”");
       return s === "declined" ? { outcome: "cancelled" } : { outcome: "done", script: s };
     },
+    addScript: async (a: object) => (calls.push(["addScript", a]), { outcome: "done", id: "new1" }),
+    removeScript: async (s: string) => (calls.push(["removeScript", s]), { outcome: "cancelled" }),
   };
 }
 
@@ -143,5 +145,24 @@ describe("MCP scripts", () => {
     const a = await call(host, "hunkpad_run_script", { script: "missing" });
     expect((a as { result: { isError: boolean } }).result.isError).toBe(true);
     expect(text(await call(host, "hunkpad_run_script", {}))).toMatch(/script is required/);
+  });
+});
+
+describe("MCP: adding and removing scripts", () => {
+  it("adds with trimmed fields and the repository as the default", async () => {
+    const host = fakeHost();
+    const a = await call(host, "hunkpad_add_script", { name: " build ", path: " C:/x/build.ps1 ", npm: "  " });
+    expect(host.calls).toContainEqual(["addScript", { name: "build", path: "C:/x/build.ps1", npm: undefined, savedFor: "repository" }]);
+    expect(text(a)).toMatch(/Added to the Scripts row/);
+  });
+
+  it("checks savedFor and the required fields", async () => {
+    const host = fakeHost();
+    expect(text(await call(host, "hunkpad_add_script", { name: "x", path: "C:/a.ps1", savedFor: "everywhere" }))).toMatch(/savedFor/);
+    expect(text(await call(host, "hunkpad_add_script", { name: "x" }))).toMatch(/path is required/);
+  });
+
+  it("says when the user declined a removal", async () => {
+    expect(text(await call(fakeHost(), "hunkpad_remove_script", { script: "s1" }))).toMatch(/declined/);
   });
 });

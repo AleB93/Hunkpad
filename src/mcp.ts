@@ -29,6 +29,8 @@ export interface McpHost {
   listScripts(): unknown;
   /** `script`: an id or a name from listScripts. */
   runScript(script: string): Promise<{ outcome: Outcome } & Record<string, unknown>>;
+  addScript(s: { name: string; path: string; npm?: string; savedFor: "repository" | "worktree" }): Promise<{ outcome: Outcome } & Record<string, unknown>>;
+  removeScript(script: string): Promise<{ outcome: Outcome } & Record<string, unknown>>;
 }
 
 /** A tool's input is wrong, or what it names does not exist: reported to Claude as a tool error. */
@@ -194,6 +196,27 @@ export const TOOLS = [
       "whether it started.",
     inputSchema: obj({ script: str("The script's id, or its name, from hunkpad_list_scripts.") }, ["script"]),
   },
+  {
+    name: "hunkpad_add_script",
+    description:
+      "Add a ▶ button to the active repository's Scripts row: an existing script file (.ps1, .cmd, .bat, .sh, .py, " +
+      ".js…) by absolute path, or an npm script of a package.json (path to the package.json plus npm = the script " +
+      "name). The user approves it in Hunkpad. It is saved, not run.",
+    inputSchema: obj(
+      {
+        name: str("Button label, e.g. 'build & run'."),
+        path: str("Absolute path of the script file, or of a package.json."),
+        npm: str("For a package.json: which of its scripts to run (npm run <npm>)."),
+        savedFor: { type: "string", enum: ["repository", "worktree"], description: "repository (default): every worktree of the repository; worktree: only this one." },
+      },
+      ["name", "path"],
+    ),
+  },
+  {
+    name: "hunkpad_remove_script",
+    description: "Remove a ▶ button from the Scripts row (the script file itself is not deleted). The user approves it in Hunkpad.",
+    inputSchema: obj({ script: str("The script's id, or its name, from hunkpad_list_scripts.") }, ["script"]),
+  },
 ] as const;
 
 type Args = Record<string, unknown>;
@@ -315,6 +338,17 @@ async function callTool(host: McpHost, name: string, args: Args): Promise<unknow
     case "hunkpad_run_script": {
       const { outcome, ...rest } = await host.runScript(needString(args, "script").trim());
       return { outcome: outcome === "done" ? "Started in a new window." : outcomeText[outcome], ...rest };
+    }
+    case "hunkpad_add_script": {
+      const savedFor = optString(args, "savedFor") ?? "repository";
+      if (savedFor !== "repository" && savedFor !== "worktree") throw new ToolError("savedFor must be repository or worktree");
+      const npm = optString(args, "npm")?.trim() || undefined;
+      const { outcome, ...rest } = await host.addScript({ name: needString(args, "name").trim(), path: needString(args, "path").trim(), npm, savedFor });
+      return { outcome: outcome === "done" ? "Added to the Scripts row." : outcomeText[outcome], ...rest };
+    }
+    case "hunkpad_remove_script": {
+      const { outcome, ...rest } = await host.removeScript(needString(args, "script").trim());
+      return { outcome: outcome === "done" ? "Removed from the Scripts row." : outcomeText[outcome], ...rest };
     }
     default:
       throw new ToolError(`unknown tool: ${name}`);

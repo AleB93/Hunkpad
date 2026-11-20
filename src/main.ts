@@ -7195,7 +7195,7 @@ const mcpHost: McpHost = {
       repo: r.root,
       runsIn: r.root,
       scripts,
-      note: scripts.length ? "Run one with hunkpad_run_script; the user approves it first." : "No scripts saved: the user adds them with + Script in Hunkpad.",
+      note: scripts.length ? "Run one with hunkpad_run_script; the user approves it first." : "No scripts saved yet: add one with hunkpad_add_script (the user approves it), or the user adds it with + Script.",
     };
   },
 
@@ -7217,6 +7217,49 @@ const mcpHost: McpHost = {
     });
     if (!ok) return { outcome: "cancelled" };
     return (await runScript(s)) ? { outcome: "done", script: s.name, folder: r.root } : { outcome: "failed", script: s.name };
+  },
+
+  async addScript({ name, path, npm, savedFor }) {
+    const r = needRepo();
+    // The same checks as the + Script dialog.
+    if (!/^([a-z]:[\\/]|\/)/i.test(path)) throw new ToolError(`Give an absolute path: ${path}`);
+    if (!(await invoke<boolean>("is_file", { path }))) throw new ToolError(`No file at ${path}`);
+    if (isPackageJson(path)) {
+      const names = npmScriptNames(await invoke<string>("read_package_json", { path }).catch(() => ""));
+      if (!npm) throw new ToolError(`For a package.json, give npm: one of ${names.join(", ") || "(it has no scripts)"}`);
+      if (!names.includes(npm)) throw new ToolError(`${path} has no npm script “${npm}”. Its scripts: ${names.join(", ") || "none"}`);
+    } else if (npm) throw new ToolError("npm is only for a package.json path");
+    if (scriptEntries(r.root).some((e) => e.s.name.toLowerCase() === name.toLowerCase()))
+      throw new ToolError(`There is already a script named “${name}”`);
+    const owner = savedFor === "worktree" ? r.root : scriptHome(r.root);
+    const what = npm ? `npm run ${npm}\n(in the folder of ${path})` : path;
+    const where = samePath(owner, scriptHome(r.root)) ? "every worktree of the repository" : "this worktree only";
+    const ok = await ask(`Claude Code wants to add a script button “${name}”:\n\n${what}\n\nfor ${where} (${folderName(owner)}). It is only saved, not run.`, {
+      title: "Hunkpad",
+      okLabel: "Add it",
+      cancelLabel: "Decline",
+    });
+    if (!ok) return { outcome: "cancelled" };
+    const s: UserScript = { id: newUserId(), name, path, ...(npm ? { npm } : {}) };
+    updateScripts(owner, (list) => [...list, s]);
+    setStatus(`Claude Code added the script “${name}”`);
+    return { outcome: "done", id: s.id, name, savedFor: where };
+  },
+
+  async removeScript(wanted) {
+    const r = needRepo();
+    const entries = scriptEntries(r.root);
+    const e = entries.find((x) => x.s.id === wanted) ?? entries.find((x) => x.s.name.toLowerCase() === wanted.toLowerCase());
+    if (!e) throw new ToolError(`No script “${wanted}” in ${folderName(r.root)}. Scripts: ${entries.map((x) => `“${x.s.name}”`).join(", ") || "none"}`);
+    const ok = await ask(`Claude Code wants to remove the script button “${e.s.name}” (${e.s.npm ? `npm run ${e.s.npm}` : e.s.path}).\n\nThe file itself is not deleted.`, {
+      title: "Hunkpad",
+      okLabel: "Remove it",
+      cancelLabel: "Decline",
+    });
+    if (!ok) return { outcome: "cancelled" };
+    updateScripts(e.owner, (list) => list.filter((x) => x.id !== e.s.id));
+    setStatus(`Claude Code removed the script “${e.s.name}”`);
+    return { outcome: "done", name: e.s.name };
   },
 
   async switchRepo(root) {

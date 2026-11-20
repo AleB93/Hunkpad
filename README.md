@@ -92,6 +92,7 @@ what I have open in Hunkpad"* or *"split my changes into groups"*.
 | `hunkpad_switch_repo` | switch to another open tab |
 | `hunkpad_list_scripts` | the repository's saved scripts (the ▶ buttons) and where they run |
 | `hunkpad_run_script` | start one in a new window, **after you approve it in Hunkpad** |
+| `hunkpad_add_script` · `remove_script` | add or remove a ▶ button (a script file or an npm script), **after you approve it** |
 
 The server listens on `127.0.0.1:47821` only and needs a secret token (stored
 in Hunkpad's settings and in Claude Code's config); requests from web pages
